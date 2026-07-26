@@ -109,7 +109,9 @@ console.log(result.agentResults.get('coordinator')?.output)
 
 用 `planOnly` 在执行前审查生成的任务图，再通过 `createPlanArtifact()` 和 `runFromPlan()` 回放。当一个答案需要额外把关时，`runConsensus()` 提供 proposer→judge 校验循环。
 
-自动 `runTeam()` 的拓扑可通过 `OpenMultiAgent` 或单次调用的 `executionRouter` 插拔。内置 `DeterministicRouter` 使用语言中立的结构信号和按 script 加权的长度估计，并对空 roster 做 Single 路径资格检查；自定义 Router 只接收不含完整 prompt 的 roster 摘要，失败时安全回退。显式 `mode` 与治理声明始终优先，auto 结果通过 `routingDecision` 暴露决定。详见[执行路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md)。Execution Routing 选择 Single 或 Team，[Model Routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)选择该拓扑内使用的模型。
+自动 `runTeam()` 默认使用混合语义路由。低成本的 `DeterministicRouter` 会直接保留 Team 决策，只把 Single 候选交给一次无工具调用的 `TaskProfiler`；随后由确定性 Policy 决定保持 Single、升级为 Team，或要求调用方显式声明治理约束。有效的自定义 `executionRouter` 决策、显式 `mode` 和治理声明仍具有更高优先级。如需恢复不调用 Profiler 的旧路由行为，可设置 `executionRouting: { strategy: 'deterministic' }`。自动路由结果通过 `routingDecision` 暴露实际决定；运行过 Profiler 时，还会提供 `semanticRoutingAssessment`。详见[执行路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md)。Execution Routing 选择 Single 或 Team，[Model Routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)选择该拓扑内使用的模型。
+
+Profiler 会把目标文本发送给显式配置的路由 adapter；若未配置，则依次使用 Coordinator adapter 和 Orchestrator 的默认 Provider。最后一种回退即使在每个 worker 都有独立 adapter 时也可能产生默认 Provider 调用。若目标不能跨越该 Provider 边界，请配置 `executionRouting.adapter` 或使用 deterministic 策略。
 
 当应用必须强制使用具名的独立角色时，直接声明治理意图，而不是依赖目标里的措辞：
 

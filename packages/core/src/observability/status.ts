@@ -1,4 +1,10 @@
-import { CostBudgetExceededError, LLMCallTimeoutError, TokenBudgetExceededError, isRetryableError } from '../errors.js'
+import {
+  CostBudgetExceededError,
+  LLMCallTimeoutError,
+  RoutingTimeoutError,
+  TokenBudgetExceededError,
+  isRetryableError,
+} from '../errors.js'
 import type {
   RunStatus,
   StructuredTraceError,
@@ -46,7 +52,7 @@ export function classifyRunFailure(
   if (error instanceof TokenBudgetExceededError || error instanceof CostBudgetExceededError) {
     statusCode = 'budget_exhausted'
     kind = 'budget'
-  } else if (error instanceof LLMCallTimeoutError) {
+  } else if (error instanceof LLMCallTimeoutError || error instanceof RoutingTimeoutError) {
     statusCode = 'timeout'
     kind = 'timeout'
   } else if (error instanceof Error && error.name === 'AbortError') {
