@@ -60,6 +60,14 @@ export {
   executeWithRetry,
   computeRetryDelay,
 } from './orchestrator/orchestrator.js'
+export {
+  evaluateSemanticRoutingPolicy,
+  HYBRID_ROUTER_VERSION,
+  LLMTaskProfiler,
+  taskProfileSchema,
+  TaskProfileValidationError,
+  validateTaskProfilerResult,
+} from './orchestrator/task-profiler.js'
 export type {
   ExecutionRouter,
   ExecutionRoutingDecisionRecord,
@@ -67,6 +75,8 @@ export type {
   RoutingBudget,
   RoutingContext,
   RoutingDecision,
+  RoutingDecisionStatus,
+  RoutingFallbackCode,
   RosterSummaryEntry,
 } from './orchestrator/execution-router.js'
 export {
@@ -172,7 +182,16 @@ export type { RegisterBuiltInToolsOptions } from './tool/built-in/index.js'
 
 export { createAdapter } from './llm/adapter.js'
 export type { SupportedProvider } from './llm/adapter.js'
-export { TokenBudgetExceededError, CostBudgetExceededError, InvalidMessageError, LLMCallTimeoutError, isRetryableError } from './errors.js'
+export {
+  TokenBudgetExceededError,
+  CostBudgetExceededError,
+  InvalidMessageError,
+  LLMCallTimeoutError,
+  RoutingDeclarationRequiredError,
+  RoutingProfilerFailedError,
+  RoutingTimeoutError,
+  isRetryableError,
+} from './errors.js'
 export { createRunIdentity, createRestoreIdentity, validateRunId } from './observability/identity.js'
 export { classifyRunFailure } from './observability/status.js'
 export type {
@@ -325,6 +344,16 @@ export type {
   GovernanceUnsatisfiedReason,
   RunMetrics,
   RunTeamOptions,
+  ExecutionRoutingConfig,
+  ExecutionRoutingStrategy,
+  RoutingFailurePolicy,
+  SemanticRoutingAssessment,
+  SemanticRoutingOutcome,
+  SemanticRoutingRecommendation,
+  TaskProfile,
+  TaskProfiler,
+  TaskProfilerContext,
+  TaskProfilerResult,
   RunTasksOptions,
   RunTaskSpec,
   TaskMetadata,

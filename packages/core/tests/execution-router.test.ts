@@ -8,6 +8,7 @@ import { buildExecutionReceipt } from '../src/observability/execution-receipt.js
 import { TRACE_RECORD_OBSERVER } from '../src/observability/runtime.js'
 import type { TraceRecord } from '../src/observability/records.js'
 import { OpenMultiAgent } from '../src/orchestrator/orchestrator.js'
+import { RoutingTimeoutError } from '../src/errors.js'
 import type {
   AgentConfig,
   ExecutionRouter,
@@ -256,6 +257,7 @@ describe('runTeam execution routing', () => {
         },
       } satisfies ExecutionRouter,
       reason: 'custom decision failed',
+      fallbackCode: 'router-error',
     },
     {
       name: 'rejects',
@@ -264,6 +266,7 @@ describe('runTeam execution routing', () => {
         decide: async () => Promise.reject(new Error('router unavailable')),
       } satisfies ExecutionRouter,
       reason: 'custom decision failed',
+      fallbackCode: 'router-error',
     },
     {
       name: 'returns an unsupported mode',
@@ -276,16 +279,44 @@ describe('runTeam execution routing', () => {
         }),
       } as unknown as ExecutionRouter,
       reason: 'invalid decision',
+      fallbackCode: 'invalid-decision',
     },
-  ])('falls back to DeterministicRouter when a custom router $name', async ({ router, reason }) => {
+  ])('falls back to DeterministicRouter when a custom router $name', async ({
+    router,
+    reason,
+    fallbackCode,
+  }) => {
     const result = await run('Say hello', { executionRouter: router })
 
     expect(result.success).toBe(true)
     expect(result.routingDecision).toMatchObject({
       mode: 'single',
       routerVersion: DETERMINISTIC_ROUTER_VERSION,
+      status: 'fallback',
+      fallbackCode,
     })
     expect(result.routingDecision?.reasons.join(' ')).toContain(reason)
+  })
+
+  it('reports Router timeout and honors fallback/fail policies', async () => {
+    const stalled: ExecutionRouter = {
+      version: 'stalled-router-v1',
+      decide: () => new Promise(() => {}),
+    }
+    const fallback = await run('Say hello', {
+      executionRouter: stalled,
+      executionRouting: { timeoutMs: 1 },
+    })
+    expect(fallback.routingDecision).toMatchObject({
+      status: 'fallback',
+      requestedRouterVersion: 'stalled-router-v1',
+      fallbackCode: 'router-timeout',
+    })
+
+    await expect(run('Say hello', {
+      executionRouter: stalled,
+      executionRouting: { timeoutMs: 1, failurePolicy: 'fail' },
+    })).rejects.toBeInstanceOf(RoutingTimeoutError)
   })
 
   it('bypasses routers and marks an explicit mode as an override', async () => {

@@ -49,6 +49,7 @@ import type {
   ConsensusOptions,
   ConsensusResult,
   CoordinatorConfig,
+  ExecutionRoutingConfig,
   PlanArtifact,
   PlanTaskArtifact,
   OrchestratorConfig,
@@ -62,7 +63,9 @@ import type {
   RunTaskSpec,
   RunTasksOptions,
   RunTeamOptions,
+  SemanticRoutingAssessment,
   Task,
+  TaskProfiler,
   TaskExecutionMetrics,
   TaskExecutionRecord,
   TaskStatus,
@@ -73,7 +76,9 @@ import type {
 import type { RunOptions } from '../agent/runner.js'
 import { Agent } from '../agent/agent.js'
 import { AgentPool } from '../agent/pool.js'
+import { createAdapter } from '../llm/adapter.js'
 import { emitTrace, generateSpanId } from '../utils/trace.js'
+import { mergeAbortSignals } from '../utils/abort.js'
 import { defaultWorkspaceDir } from '../tool/built-in/path-safety.js'
 import { Team } from '../team/team.js'
 import { TaskQueue } from '../task/queue.js'
@@ -82,7 +87,13 @@ import { InMemoryStore } from '../memory/store.js'
 import { createTask, validateTaskDependencies } from '../task/task.js'
 import { validateTaskMetadata } from '../task/metadata.js'
 import { Scheduler } from './scheduler.js'
-import { CostBudgetExceededError, TokenBudgetExceededError } from '../errors.js'
+import {
+  CostBudgetExceededError,
+  RoutingDeclarationRequiredError,
+  RoutingProfilerFailedError,
+  RoutingTimeoutError,
+  TokenBudgetExceededError,
+} from '../errors.js'
 import {
   createRestoreIdentity,
   resolveRestoreMetadata,
@@ -140,6 +151,13 @@ import {
   DeterministicRouter,
   resolveExecutionRouting,
 } from './execution-router.js'
+import {
+  evaluateSemanticRoutingPolicy,
+  HYBRID_ROUTER_VERSION,
+  LLMTaskProfiler,
+  TaskProfileValidationError,
+  validateTaskProfilerResult,
+} from './task-profiler.js'
 import { executeQueue, saveRunCheckpoint } from './task-execution.js'
 import {
   buildGovernanceTaskSpecs,
@@ -201,6 +219,14 @@ interface EffectiveRunBudgets {
   readonly maxCostBudget?: number
 }
 
+interface SemanticProfileRun {
+  readonly assessment: SemanticRoutingAssessment
+  readonly usage?: TokenUsage
+  readonly model?: string
+  readonly provider?: string
+  readonly reasons: readonly string[]
+}
+
 function resolveRunBudgets(
   config: Pick<OrchestratorConfig, 'maxTokenBudget' | 'maxCostBudget' | 'estimateCost'>,
   options?: Pick<RunTasksOptions, 'maxTokenBudget' | 'maxCostBudget'>,
@@ -231,6 +257,7 @@ export class OpenMultiAgent {
   > & Pick<OrchestratorConfig, 'onApproval' | 'onTaskDispatch' | 'onAgentStream' | 'onPlanReady' | 'onProgress' | 'onTrace' | 'onToolCall' | 'observability' | 'evaluation' | 'defaultBaseURL' | 'defaultApiKey' | 'maxTokenBudget' | 'maxCostBudget' | 'estimateCost' | 'defaultToolPreset' | 'checkpoint'>
 
   private readonly teams: Map<string, Team> = new Map()
+  private readonly hasConfiguredCustomExecutionRouter: boolean
   private readonly fallbackCheckpointStore = new InMemoryStore()
   private completedTaskCount = 0
   private readonly traceRecordObserver?: TraceRecordObserver
@@ -260,6 +287,7 @@ export class OpenMultiAgent {
     }
 
     this.traceRecordObserver = traceRecordObserverFrom(config)
+    this.hasConfiguredCustomExecutionRouter = config.executionRouter !== undefined
     this.onlineEvaluator = createOnlineEvaluator(config.evaluation, config.estimateCost)
     this.evaluation = this.onlineEvaluator ?? NOOP_ONLINE_EVALUATION
     const hasExplicitLegacyBridge = config.observability?.sinks.some(
@@ -281,6 +309,23 @@ export class OpenMultiAgent {
       schedulingWeights: config.schedulingWeights ?? {},
       strictAssignees: config.strictAssignees ?? false,
       executionRouter: config.executionRouter ?? new DeterministicRouter(),
+      executionRouting: {
+        strategy: config.executionRouting?.strategy ?? 'hybrid',
+        confidenceThreshold: config.executionRouting?.confidenceThreshold ?? 0.7,
+        failurePolicy: config.executionRouting?.failurePolicy ?? 'fallback',
+        ...(config.executionRouting?.profiler !== undefined
+          ? { profiler: config.executionRouting.profiler }
+          : {}),
+        ...(config.executionRouting?.model !== undefined
+          ? { model: config.executionRouting.model }
+          : {}),
+        ...(config.executionRouting?.adapter !== undefined
+          ? { adapter: config.executionRouting.adapter }
+          : {}),
+        ...(config.executionRouting?.timeoutMs !== undefined
+          ? { timeoutMs: config.executionRouting.timeoutMs }
+          : {}),
+      },
       defaultModel: config.defaultModel ?? DEFAULT_MODEL,
       defaultProvider: config.defaultProvider ?? 'anthropic',
       defaultBaseURL: config.defaultBaseURL,
@@ -326,6 +371,251 @@ export class OpenMultiAgent {
         },
       },
     )
+  }
+
+  private resolveExecutionRoutingConfig(
+    override?: ExecutionRoutingConfig,
+    coordinator?: CoordinatorConfig,
+  ): Required<
+    Pick<
+      ExecutionRoutingConfig,
+      'strategy' | 'confidenceThreshold' | 'failurePolicy'
+    >
+  > & Omit<ExecutionRoutingConfig, 'strategy' | 'confidenceThreshold' | 'failurePolicy'> {
+    const profiler = override?.profiler ?? this.config.executionRouting.profiler
+    const model = override?.model ?? this.config.executionRouting.model
+    const adapter = override?.adapter ?? this.config.executionRouting.adapter
+    const timeoutMs =
+      override?.timeoutMs
+      ?? this.config.executionRouting.timeoutMs
+      ?? coordinator?.callTimeoutMs
+    const resolved = {
+      strategy: override?.strategy ?? this.config.executionRouting.strategy ?? 'hybrid',
+      confidenceThreshold:
+        override?.confidenceThreshold
+        ?? this.config.executionRouting.confidenceThreshold
+        ?? 0.7,
+      failurePolicy:
+        override?.failurePolicy
+        ?? this.config.executionRouting.failurePolicy
+        ?? 'fallback',
+      ...(profiler !== undefined ? { profiler } : {}),
+      ...(model !== undefined ? { model } : {}),
+      ...(adapter !== undefined ? { adapter } : {}),
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    }
+    if (resolved.strategy !== 'hybrid' && resolved.strategy !== 'deterministic') {
+      throw new TypeError("executionRouting.strategy must be 'hybrid' or 'deterministic'.")
+    }
+    if (resolved.failurePolicy !== 'fallback' && resolved.failurePolicy !== 'fail') {
+      throw new TypeError("executionRouting.failurePolicy must be 'fallback' or 'fail'.")
+    }
+    if (
+      !Number.isFinite(resolved.confidenceThreshold)
+      || resolved.confidenceThreshold < 0
+      || resolved.confidenceThreshold > 1
+    ) {
+      throw new TypeError('executionRouting.confidenceThreshold must be between 0 and 1.')
+    }
+    if (
+      resolved.timeoutMs !== undefined
+      && (!Number.isFinite(resolved.timeoutMs) || resolved.timeoutMs <= 0)
+    ) {
+      throw new TypeError('executionRouting.timeoutMs must be a positive finite number.')
+    }
+    return resolved
+  }
+
+  private async resolveTaskProfiler(
+    routingConfig: ExecutionRoutingConfig,
+    coordinator?: CoordinatorConfig,
+  ): Promise<TaskProfiler> {
+    if (routingConfig.profiler !== undefined) return routingConfig.profiler
+    const adapter = routingConfig.adapter
+      ?? coordinator?.adapter
+      ?? await createAdapter(
+        this.config.defaultProvider,
+        this.config.defaultApiKey,
+        this.config.defaultBaseURL,
+      )
+    return new LLMTaskProfiler({
+      adapter,
+      model: routingConfig.model ?? coordinator?.model ?? this.config.defaultModel,
+    })
+  }
+
+  private async runSemanticProfiler(
+    context: ReturnType<typeof buildRoutingContext>,
+    routingConfig: ReturnType<OpenMultiAgent['resolveExecutionRoutingConfig']>,
+    coordinator: CoordinatorConfig | undefined,
+    traceRuntime: TraceRuntime | undefined,
+    facts: {
+      readonly hasConsequentialTools: boolean
+      readonly permissionBoundaryCount: number
+    },
+  ): Promise<SemanticProfileRun> {
+    let profiler: TaskProfiler | undefined
+    const startedAt = Date.now()
+    const span = traceRuntime?.startSpan({
+      kind: 'routing',
+      name: 'profile_execution_route',
+      parent: traceRuntime.root,
+      attributes: {
+        'oma.routing.semantic.strategy': 'hybrid',
+        'oma.routing.semantic.confidence_threshold': routingConfig.confidenceThreshold,
+      },
+    })
+    try {
+      profiler = await this.resolveTaskProfiler(routingConfig, coordinator)
+      if (typeof profiler.version !== 'string' || profiler.version.length === 0) {
+        throw new TaskProfileValidationError(
+          'Task profiler version must be a non-empty string.',
+        )
+      }
+      const timeoutMs = routingConfig.timeoutMs
+      let abortSignal = context.abortSignal
+      let timeoutSignal: AbortSignal | undefined
+      if (timeoutMs !== undefined && timeoutMs > 0) {
+        timeoutSignal = AbortSignal.timeout(timeoutMs)
+        abortSignal = abortSignal
+          ? mergeAbortSignals(abortSignal, timeoutSignal)
+          : timeoutSignal
+      }
+      const profilePromise = Promise.resolve(profiler.profile({
+        goal: context.goal,
+        roster: context.roster,
+        ...(context.budget !== undefined ? { budget: context.budget } : {}),
+        ...(abortSignal !== undefined ? { abortSignal } : {}),
+      }))
+      const rawResult = timeoutSignal === undefined
+        ? await profilePromise
+        : await Promise.race([
+            profilePromise,
+            new Promise<never>((_, reject) => {
+              timeoutSignal!.addEventListener(
+                'abort',
+                () => reject(new RoutingTimeoutError(timeoutMs!, 'profiler')),
+                { once: true },
+              )
+            }),
+          ])
+      const result = validateTaskProfilerResult(rawResult)
+      const policy = evaluateSemanticRoutingPolicy(result.profile, {
+        confidenceThreshold: routingConfig.confidenceThreshold,
+        ...facts,
+      })
+      const assessment: SemanticRoutingAssessment = {
+        profilerVersion: profiler.version,
+        profile: result.profile,
+        ...(result.model !== undefined ? { model: result.model } : {}),
+        ...(result.provider !== undefined ? { provider: result.provider } : {}),
+        legacyMode: 'single',
+        recommendation: policy.recommendation,
+        outcome: 'applied',
+        ...(result.usage !== undefined ? { usage: result.usage } : {}),
+      }
+      span?.end({
+        status: statusOnly('ok'),
+        attributes: {
+          'oma.routing.semantic.profiler_version': profiler.version,
+          'oma.routing.semantic.recommendation': policy.recommendation,
+          'oma.routing.semantic.confidence': result.profile.confidence,
+          ...(result.model !== undefined
+            ? { 'gen_ai.request.model': result.model }
+            : {}),
+          ...(result.provider !== undefined
+            ? { 'gen_ai.provider.name': result.provider }
+            : {}),
+          ...(result.usage !== undefined
+            ? {
+                'gen_ai.usage.input_tokens': result.usage.input_tokens,
+                'gen_ai.usage.output_tokens': result.usage.output_tokens,
+              }
+            : {}),
+          'oma.routing.semantic.duration_ms': Math.max(0, Date.now() - startedAt),
+        },
+      })
+      return {
+        assessment,
+        ...(result.usage !== undefined ? { usage: result.usage } : {}),
+        ...(result.model !== undefined ? { model: result.model } : {}),
+        ...(result.provider !== undefined ? { provider: result.provider } : {}),
+        reasons: policy.reasons,
+      }
+    } catch (error) {
+      if (context.abortSignal?.aborted) {
+        span?.end({ status: statusOnly('cancelled') })
+        throw error
+      }
+      const fallbackCode = error instanceof RoutingTimeoutError
+        ? 'profiler-timeout'
+        : error instanceof TaskProfileValidationError
+          ? 'invalid-profile'
+          : profiler === undefined
+            ? 'profiler-unavailable'
+            : 'profiler-error'
+      const failure = error instanceof RoutingTimeoutError
+        ? error
+        : new RoutingProfilerFailedError(
+            'Semantic routing profiler failed to produce a valid task profile.',
+            error,
+          )
+      const validationFailure = error instanceof TaskProfileValidationError
+        ? error
+        : undefined
+      span?.end({
+        status: statusOnly('error'),
+        error: classifyRunFailure(failure).errorInfo,
+        attributes: {
+          'oma.routing.semantic.fallback_code': fallbackCode,
+          'oma.routing.semantic.duration_ms': Math.max(0, Date.now() - startedAt),
+          ...(validationFailure?.usage !== undefined
+            ? {
+                'gen_ai.usage.input_tokens': validationFailure.usage.input_tokens,
+                'gen_ai.usage.output_tokens': validationFailure.usage.output_tokens,
+              }
+            : {}),
+          ...(validationFailure?.model !== undefined
+            ? { 'gen_ai.request.model': validationFailure.model }
+            : {}),
+          ...(validationFailure?.provider !== undefined
+            ? { 'gen_ai.provider.name': validationFailure.provider }
+            : {}),
+        },
+      })
+      if (routingConfig.failurePolicy === 'fail') throw failure
+      return {
+        assessment: {
+          profilerVersion: 'none',
+          ...(typeof profiler?.version === 'string' && profiler.version.length > 0
+            ? { requestedProfilerVersion: profiler.version }
+            : {}),
+          legacyMode: 'single',
+          recommendation: 'single',
+          outcome: 'fallback',
+          fallbackCode,
+          ...(validationFailure?.model !== undefined
+            ? { model: validationFailure.model }
+            : {}),
+          ...(validationFailure?.provider !== undefined
+            ? { provider: validationFailure.provider }
+            : {}),
+          ...(validationFailure?.usage !== undefined
+            ? { usage: validationFailure.usage }
+            : {}),
+        },
+        ...(validationFailure?.usage !== undefined
+          ? { usage: validationFailure.usage }
+          : {}),
+        ...(validationFailure?.model !== undefined
+          ? { model: validationFailure.model }
+          : {}),
+        ...(validationFailure?.provider !== undefined
+          ? { provider: validationFailure.provider }
+          : {}),
+        reasons: ['Semantic profiling failed; keeping the deterministic Single route.'],
+      }
+    }
   }
 
   private beginOnlineEvaluation(input: unknown): PendingOnlineEvaluation | undefined {
@@ -612,16 +902,80 @@ export class OpenMultiAgent {
 
     const { identity, metadata } = createRunFacts(identityOptionsForRun(options))
     const traceRuntime = this.startTrace(identity, metadata)
-    const routerDecision: ExecutionRoutingDecision | undefined = explicitMode === undefined
+    const executionRouting = this.resolveExecutionRoutingConfig(
+      options?.executionRouting,
+      options?.coordinator,
+    )
+    const routingContext = buildRoutingContext(
+      goal,
+      agentConfigs,
+      this.config.defaultModel,
+      budgets,
+      options?.abortSignal,
+    )
+    let routerDecision: ExecutionRoutingDecision | undefined = explicitMode === undefined
       && !options?.planOnly
       && !preferredBudgetDegraded
       ? await resolveExecutionRouting(
           options?.executionRouter ?? this.config.executionRouter,
-          buildRoutingContext(goal, agentConfigs, this.config.defaultModel, budgets),
+          routingContext,
           new DeterministicRouter(),
+          {
+            timeoutMs: executionRouting.timeoutMs,
+            failurePolicy: executionRouting.failurePolicy,
+          },
         )
       : undefined
-    const routingDecisionInput: RoutingDecisionRecordInput = explicitMode !== undefined
+    let semanticProfileRun: SemanticProfileRun | undefined
+    const customRouterSelected = options?.executionRouter !== undefined
+      || this.hasConfiguredCustomExecutionRouter
+    const shouldProfile = executionRouting.strategy === 'hybrid'
+      && routerDecision?.mode === 'single'
+      && !options?.abortSignal?.aborted
+      && (!customRouterSelected || routerDecision.status === 'fallback')
+    if (shouldProfile) {
+      const deterministicSingleDecision = routerDecision!
+      const effectiveAgents = agentConfigs.map((agentConfig) =>
+        applyDefaultToolPreset(
+          applyAgentDefaults(agentConfig, this.config),
+          this.config.defaultToolPreset,
+        ))
+      semanticProfileRun = await this.runSemanticProfiler(
+        routingContext,
+        executionRouting,
+        options?.coordinator,
+        traceRuntime,
+        {
+          hasConsequentialTools: effectiveAgents.some((agentConfig) =>
+            hasGrantedConsequentialTool(agentConfig, { includeDelegateTool: true })),
+          permissionBoundaryCount: new Set(
+            effectiveAgents
+              .map((agentConfig) => agentConfig.permissionBoundary)
+              .filter((boundary): boundary is string =>
+                typeof boundary === 'string' && boundary.length > 0),
+          ).size,
+        },
+      )
+      if (semanticProfileRun.assessment.recommendation === 'team') {
+        routerDecision = {
+          ...deterministicSingleDecision,
+          mode: 'team',
+          confidence: semanticProfileRun.assessment.profile?.confidence,
+          reasons: [...deterministicSingleDecision.reasons, ...semanticProfileRun.reasons],
+          routerVersion: HYBRID_ROUTER_VERSION,
+        }
+      }
+      semanticProfileRun = {
+        ...semanticProfileRun,
+        assessment: {
+          ...semanticProfileRun.assessment,
+          ...(semanticProfileRun.assessment.recommendation !== 'needs-declaration'
+            ? { actualMode: routerDecision!.mode }
+            : {}),
+        },
+      }
+    }
+    let routingDecisionInput: RoutingDecisionRecordInput = explicitMode !== undefined
       ? {
           source: 'override',
           mode: explicitMode,
@@ -648,11 +1002,72 @@ export class OpenMultiAgent {
               mode: routerDecision!.mode,
               reasons: routerDecision!.reasons,
               routerVersion: routerDecision!.routerVersion,
+              ...(routerDecision!.status !== undefined
+                ? { status: routerDecision!.status }
+                : {}),
+              ...(routerDecision!.requestedRouterVersion !== undefined
+                ? { requestedRouterVersion: routerDecision!.requestedRouterVersion }
+                : {}),
+              ...(routerDecision!.fallbackCode !== undefined
+                ? { fallbackCode: routerDecision!.fallbackCode }
+                : {}),
               ...(routerDecision!.confidence !== undefined
                 ? { confidence: routerDecision!.confidence }
                 : {}),
+              ...(semanticProfileRun !== undefined
+                ? { semanticRoutingAssessment: semanticProfileRun.assessment }
+                : {}),
             }
+    const routingBudget = semanticProfileRun?.usage !== undefined
+      ? applyBudgetAccounting({
+          currentUsage: ZERO_USAGE,
+          currentCost: 0,
+          usage: semanticProfileRun.usage,
+          maxTokenBudget: budgets.maxTokenBudget,
+          maxCostBudget: budgets.maxCostBudget,
+          estimateCost: this.config.estimateCost,
+          costContext: buildCostEstimateContext({
+            agentName: 'semantic-router',
+            model:
+              semanticProfileRun.model
+              ?? executionRouting.model
+              ?? options?.coordinator?.model
+              ?? this.config.defaultModel,
+            phase: 'routing',
+          }),
+        })
+      : undefined
+    const routingUsage = routingBudget?.cumulativeUsage ?? ZERO_USAGE
+    const routingCost = routingBudget?.cumulativeCost ?? 0
+    if (
+      semanticProfileRun !== undefined
+      && routingBudget !== undefined
+      && this.config.estimateCost !== undefined
+    ) {
+      semanticProfileRun = {
+        ...semanticProfileRun,
+        assessment: {
+          ...semanticProfileRun.assessment,
+          estimatedCost: routingCost,
+        },
+      }
+      routingDecisionInput = {
+        ...routingDecisionInput,
+        semanticRoutingAssessment: semanticProfileRun.assessment,
+      }
+    }
     const routingDecision = recordRoutingDecision(identity, traceRuntime, routingDecisionInput)
+    if (semanticProfileRun?.assessment.recommendation === 'needs-declaration') {
+      const error = new RoutingDeclarationRequiredError(
+        semanticProfileRun.reasons,
+        semanticProfileRun.assessment,
+      )
+      traceRuntime?.close({
+        status: statusOnly('error'),
+        error: classifyRunFailure(error).errorInfo,
+      })
+      throw error
+    }
     const undeclared = options?.governanceIntent === undefined
     const confirmationState = createConsequentialConfirmationState()
     let consequentialUndeclared = undeclared && agentConfigs.some((agentConfig) => {
@@ -667,6 +1082,20 @@ export class OpenMultiAgent {
       const resultWithRouting = {
         ...result,
         routingDecision,
+        ...(semanticProfileRun !== undefined
+          ? {
+              semanticRoutingAssessment: semanticProfileRun.assessment,
+              totalTokenUsage: addUsage(result.totalTokenUsage, routingUsage),
+              ...(result.metrics !== undefined
+                ? {
+                    metrics: {
+                      ...result.metrics,
+                      totalTokens: addUsage(result.metrics.totalTokens, routingUsage),
+                    },
+                  }
+                : {}),
+            }
+          : {}),
         ...(metadata !== undefined ? { metadata } : {}),
       }
       const governedResult = finalizeGovernanceRun(
@@ -691,6 +1120,19 @@ export class OpenMultiAgent {
       return completedResult
     }
     const coordinatorOverrides = options?.coordinator
+
+    if (routingBudget?.exceeded !== undefined) {
+      emitBudgetExceeded(this.config, routingBudget.exceeded, 'semantic-router')
+      const classified = classifyRunFailure(routingBudget.exceeded)
+      return finish(this.buildTeamRunResult(
+        new Map(),
+        identity,
+        goal,
+        [],
+        classified.status,
+        classified.errorInfo,
+      ))
+    }
 
     // ------------------------------------------------------------------
     // Short-circuit: skip coordinator for simple, single-action goals.
@@ -775,11 +1217,12 @@ export class OpenMultiAgent {
         })
       }
 
-      if (!result.budgetExceeded && this.config.estimateCost) {
+      if (!result.budgetExceeded) {
         const accounting = applyBudgetAccounting({
-          currentUsage: ZERO_USAGE,
-          currentCost: 0,
+          currentUsage: routingUsage,
+          currentCost: routingCost,
           usage: result.tokenUsage,
+          maxTokenBudget: budgets.maxTokenBudget,
           maxCostBudget: budgets.maxCostBudget,
           estimateCost: this.config.estimateCost,
           costContext: buildCostEstimateContext({
@@ -789,7 +1232,7 @@ export class OpenMultiAgent {
             phase: 'short-circuit',
           }),
         })
-        if (accounting.exceeded instanceof CostBudgetExceededError) {
+        if (accounting.exceeded !== undefined) {
           this.config.onProgress?.({
             type: 'budget_exceeded',
             agent: bestAgent.name,
@@ -893,8 +1336,8 @@ export class OpenMultiAgent {
     agentResults.set('coordinator:decompose', decompositionResult)
     const { maxTokenBudget, maxCostBudget } = budgets
     const decompositionBudget = applyBudgetAccounting({
-      currentUsage: ZERO_USAGE,
-      currentCost: 0,
+      currentUsage: routingUsage,
+      currentCost: routingCost,
       usage: decompositionResult.tokenUsage,
       maxTokenBudget,
       maxCostBudget,

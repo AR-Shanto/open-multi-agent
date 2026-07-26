@@ -109,7 +109,18 @@ Set `OPENAI_API_KEY` for this example. For other hosted or local models, see [Pr
 
 Use `planOnly` to inspect a generated task graph before execution, then `createPlanArtifact()` and `runFromPlan()` to replay it. `runConsensus()` adds a proposer→judge verification loop when one answer needs extra scrutiny.
 
-Automatic `runTeam()` topology is pluggable through `executionRouter` on `OpenMultiAgent` or one `runTeam()` call. The built-in `DeterministicRouter` uses language-neutral structure and script-aware length, with an empty-roster qualification for the Single path; custom routers receive a prompt-free roster summary and fall back safely when they fail. Explicit `mode` and declared governance always take precedence, and auto results expose `routingDecision`. See [Execution Routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md). Execution Routing selects Single versus Team; [Model Routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md) selects models inside that topology.
+Automatic `runTeam()` uses Hybrid Semantic Routing by default. The cheap
+`DeterministicRouter` keeps Team decisions and sends only Single candidates to
+a one-call, no-tool `TaskProfiler`; deterministic policy may keep Single,
+upgrade to Team, or require an explicit governance declaration. Valid custom
+`executionRouter` decisions, explicit `mode`, and declared governance retain
+higher priority. Set `executionRouting: { strategy: 'deterministic' }` for the
+legacy no-profiler path. Auto results expose `routingDecision` and, when
+profiling ran, `semanticRoutingAssessment`. See [Execution
+Routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md).
+Execution Routing selects Single versus Team; [Model
+Routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)
+selects models inside that topology.
 
 When an application must enforce named independent roles, declare that governance intent instead of relying on wording in the goal:
 

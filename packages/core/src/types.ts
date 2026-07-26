@@ -294,7 +294,7 @@ export interface CostEstimateContext {
   /** Provider used for the LLM call, when known. */
   readonly provider?: SupportedProvider
   /** Execution phase that produced this usage. */
-  readonly phase: 'agent' | 'short-circuit' | 'coordinator' | 'worker' | 'synthesis' | 'consensus' | 'delegated'
+  readonly phase: 'agent' | 'routing' | 'short-circuit' | 'coordinator' | 'worker' | 'synthesis' | 'consensus' | 'delegated'
   /** Task ID associated with the usage, when usage came from a task. */
   readonly taskId?: string
 }
@@ -687,6 +687,14 @@ export interface AgentConfig {
    * describe expected latency; OMA does not benchmark or infer a default.
    */
   readonly latencyClass?: 'low' | 'medium' | 'high'
+  /**
+   * Caller-declared permission or trust boundary for this agent.
+   *
+   * Equal values mean the application considers two agents to share one
+   * boundary. OMA never derives this value from prompts, tools, credentials, or
+   * runtime behavior. It is used only as a structured routing/governance fact.
+   */
+  readonly permissionBoundary?: string
   /**
    * Model identifier (e.g. `'claude-opus-4-6'`).
    *
@@ -1214,6 +1222,8 @@ export interface RosterSummaryEntry {
   readonly capabilities?: readonly string[]
   /** Caller-declared relative cost band. */
   readonly costTier?: AgentConfig['costTier']
+  /** Caller-declared relative response-time band. */
+  readonly latencyClass?: AgentConfig['latencyClass']
 }
 
 /** Budget still available when execution routing begins. */
@@ -1227,7 +1237,19 @@ export interface RoutingContext {
   readonly goal: string
   readonly roster: readonly RosterSummaryEntry[]
   readonly budget?: RoutingBudget
+  /** Allows custom routers to stop work when the run or routing deadline aborts. */
+  readonly abortSignal?: AbortSignal
 }
+
+/** Structured outcome when an execution router cannot supply its requested decision. */
+export type RoutingDecisionStatus = 'selected' | 'fallback'
+
+/** Machine-readable reason why a router decision fell back. */
+export type RoutingFallbackCode =
+  | 'invalid-router-version'
+  | 'invalid-decision'
+  | 'router-error'
+  | 'router-timeout'
 
 /** Explainable single-agent or team-topology decision. */
 export interface RoutingDecision {
@@ -1235,6 +1257,94 @@ export interface RoutingDecision {
   readonly confidence?: number
   readonly reasons: readonly string[]
   readonly routerVersion: string
+  /** Omitted on caller-constructed decisions for backwards compatibility. */
+  readonly status?: RoutingDecisionStatus
+  /** Version requested before a fallback selected another router. */
+  readonly requestedRouterVersion?: string
+  /** Present only when {@link status} is `fallback`. */
+  readonly fallbackCode?: RoutingFallbackCode
+}
+
+/** Model-inferred semantic signals. These are routing evidence, never governance truth. */
+export interface TaskProfile {
+  readonly evidenceSources: 'single' | 'multiple' | 'unknown'
+  readonly independentReview: 'none' | 'preferred' | 'required'
+  readonly conflictingObjectives: boolean
+  readonly sideEffectIntent: 'none' | 'possible' | 'required'
+  readonly permissionIsolation: 'none' | 'preferred' | 'required'
+  readonly decomposable: boolean
+  readonly parallelizable: boolean
+  readonly complexity: 'low' | 'medium' | 'high'
+  readonly confidence: number
+  readonly reasons: readonly string[]
+  readonly source: 'inferred'
+}
+
+/** Inputs exposed to a semantic task profiler. */
+export interface TaskProfilerContext {
+  readonly goal: string
+  readonly roster: readonly RosterSummaryEntry[]
+  readonly budget?: RoutingBudget
+  readonly abortSignal?: AbortSignal
+}
+
+/** Result returned by a semantic task profiler. */
+export interface TaskProfilerResult {
+  readonly profile: TaskProfile
+  /** Usage is optional for custom non-LLM profilers. */
+  readonly usage?: TokenUsage
+  /** Effective model/provider facts when the profiler used an LLM. */
+  readonly model?: string
+  readonly provider?: string
+}
+
+/** Provider-neutral semantic task profiler. */
+export interface TaskProfiler {
+  readonly version: string
+  profile(context: TaskProfilerContext): TaskProfilerResult | Promise<TaskProfilerResult>
+}
+
+export type ExecutionRoutingStrategy = 'hybrid' | 'deterministic'
+export type RoutingFailurePolicy = 'fallback' | 'fail'
+
+/** Hybrid execution-routing controls shared by orchestrator and per-run config. */
+export interface ExecutionRoutingConfig {
+  /** Defaults to `hybrid` in the next major behavior contract. */
+  readonly strategy?: ExecutionRoutingStrategy
+  /** Custom profiler. When omitted, OMA builds an {@link LLMTaskProfiler}. */
+  readonly profiler?: TaskProfiler
+  /** Model used by the built-in profiler. Defaults to the effective coordinator/default model. */
+  readonly model?: string
+  /** Adapter used by the built-in profiler. */
+  readonly adapter?: LLMAdapter
+  /** Minimum accepted semantic confidence. Defaults to `0.7`. */
+  readonly confidenceThreshold?: number
+  /** Shared router/profiler deadline in milliseconds. */
+  readonly timeoutMs?: number
+  /** Defaults to `fallback`; `fail` makes routing infrastructure fail closed. */
+  readonly failurePolicy?: RoutingFailurePolicy
+}
+
+export type SemanticRoutingRecommendation = 'single' | 'team' | 'needs-declaration'
+export type SemanticRoutingOutcome = 'applied' | 'fallback'
+
+/** Observable semantic assessment; it does not claim that governance occurred. */
+export interface SemanticRoutingAssessment {
+  /** Effective profiler version; `none` when no valid profile was produced. */
+  readonly profilerVersion: string
+  /** Version requested before a Profiler fallback, when it was identifiable. */
+  readonly requestedProfilerVersion?: string
+  readonly profile?: TaskProfile
+  readonly model?: string
+  readonly provider?: string
+  readonly legacyMode: 'single'
+  readonly recommendation: SemanticRoutingRecommendation
+  readonly actualMode?: RoutingDecision['mode']
+  readonly outcome: SemanticRoutingOutcome
+  readonly usage?: TokenUsage
+  /** Caller-defined estimated cost unit, when an estimator is configured. */
+  readonly estimatedCost?: number
+  readonly fallbackCode?: 'profiler-error' | 'profiler-timeout' | 'invalid-profile' | 'profiler-unavailable'
 }
 
 /** Why a `runTeam()` execution topology was selected. */
@@ -1261,6 +1371,10 @@ export interface ExecutionRoutingDecisionRecord {
   readonly confidence?: number
   readonly reasons: readonly string[]
   readonly routerVersion?: string
+  readonly status?: RoutingDecisionStatus
+  readonly requestedRouterVersion?: string
+  readonly fallbackCode?: RoutingFallbackCode
+  readonly semanticRoutingAssessment?: SemanticRoutingAssessment
 }
 
 /** Pluggable execution-topology policy for automatic `runTeam()` calls. */
@@ -1300,6 +1414,8 @@ export interface RunTeamOptions extends RunTasksOptions {
    * never override the first two layers.
    */
   readonly executionRouter?: ExecutionRouter
+  /** Per-run override for hybrid semantic execution routing. */
+  readonly executionRouting?: ExecutionRoutingConfig
   /**
    * Optional structured governance signal for this goal.
    *
@@ -1415,6 +1531,8 @@ export interface TeamRunResult extends RunOutcomeFields {
    * fixtures continue to type-check.
    */
   readonly routingDecision?: ExecutionRoutingDecisionRecord
+  /** Present only when the hybrid semantic profiler evaluated a Single candidate. */
+  readonly semanticRoutingAssessment?: SemanticRoutingAssessment
   /**
    * Post-execution governance verdict for this run.
    *
@@ -1697,6 +1815,13 @@ export interface OrchestratorConfig {
    * models inside that topology.
    */
   readonly executionRouter?: ExecutionRouter
+  /**
+   * Default hybrid execution-routing configuration.
+   *
+   * Omitted means `strategy: 'hybrid'`. Use
+   * `{ strategy: 'deterministic' }` to restore the legacy no-profiler path.
+   */
+  readonly executionRouting?: ExecutionRoutingConfig
   /**
    * Maximum depth of `delegate_to_agent` chains from a task run (default `3`).
    * Depth is per nested delegated run, not per team.
@@ -2192,6 +2317,10 @@ export interface RoutingDecisionTrace extends TraceEventBase {
   readonly confidence?: number
   readonly reasons: readonly string[]
   readonly routerVersion?: string
+  readonly status?: RoutingDecisionStatus
+  readonly requestedRouterVersion?: string
+  readonly fallbackCode?: RoutingFallbackCode
+  readonly semanticRoutingAssessment?: SemanticRoutingAssessment
 }
 
 /** Discriminated union of all trace event types. */
