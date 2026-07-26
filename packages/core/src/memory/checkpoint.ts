@@ -96,7 +96,11 @@ export class Checkpoint {
     if (value === null || typeof value !== 'object') return false
     const snapshot = value as Record<string, unknown>
     if (snapshot['version'] !== 1 && snapshot['version'] !== 2) return false
-    if (snapshot['mode'] !== 'runTeam' && snapshot['mode'] !== 'runTasks') return false
+    if (
+      snapshot['mode'] !== 'runTeam'
+      && snapshot['mode'] !== 'runTasks'
+      && snapshot['mode'] !== 'runFromPlan'
+    ) return false
     if (typeof snapshot['createdAt'] !== 'string') return false
     if (!Array.isArray(snapshot['completedTaskResults'])) return false
     if (snapshot['metadata'] !== undefined) {
@@ -120,6 +124,12 @@ export class Checkpoint {
     const queue = snapshot['queue']
     if (queue === null || typeof queue !== 'object') return false
     const queueRecord = queue as Record<string, unknown>
-    return queueRecord['version'] === 1 && Array.isArray(queueRecord['tasks'])
+    if (queueRecord['version'] !== 1 && queueRecord['version'] !== 2) return false
+    if (!Array.isArray(queueRecord['tasks'])) return false
+    if (queueRecord['version'] === 2) {
+      if (!Number.isInteger(queueRecord['planRevision'])) return false
+      if (!Array.isArray(queueRecord['planRevisions'])) return false
+    }
+    return true
   }
 }

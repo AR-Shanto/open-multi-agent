@@ -18,6 +18,7 @@ import type {
   Task,
   TaskExecutionMetrics,
   TaskStatus,
+  TaskVerificationOutcome,
   TeamInfo,
   TokenUsage,
 } from '../types.js'
@@ -46,9 +47,16 @@ import {
   applyAgentDefaults,
   applyDefaultToolPreset,
   buildAgent,
+  isLeafTask,
 } from './agent-config.js'
 import { executeWithRetry } from './retry.js'
 import { runTaskVerify } from './consensus.js'
+import {
+  buildTaskOutcome,
+  countAddedTasks,
+  planPatchSignature,
+  validatePlanPatchEligibility,
+} from './recovery.js'
 
 /**
  * Build {@link TeamInfo} for tool context, including nested `runDelegatedAgent`
@@ -164,9 +172,9 @@ export function buildTaskAgentTeamInfo(
   }
 }
 
-export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Promise<void> {
+export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Promise<boolean> {
   const active = ctx.checkpoint
-  if (!active) return
+  if (!active) return true
   const checkpointSpan = ctx.traceRuntime?.startSpan({
     kind: 'checkpoint',
     name: 'save_checkpoint',
@@ -232,6 +240,7 @@ export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Prom
   try {
     await nextSave
     checkpointSpan?.end({ status: statusOnly('ok') })
+    return true
   } catch (error) {
     const classified = classifyRunFailure(error, { kind: 'store' })
     checkpointSpan?.event('checkpoint_failed', {})
@@ -240,6 +249,7 @@ export async function saveRunCheckpoint(queue: TaskQueue, ctx: RunContext): Prom
       type: 'error',
       data: { kind: 'checkpoint_save_failed', error },
     } satisfies OrchestratorEvent)
+    return false
   }
 }
 
@@ -273,6 +283,252 @@ function evaluateDispatchGate(
   return 'allow'
 }
 
+async function applyRecoveryAtOutcome(
+  queue: TaskQueue,
+  task: Task,
+  result: AgentRunResult,
+  verification: TaskVerificationOutcome | undefined,
+  ctx: RunContext,
+): Promise<boolean> {
+  const recovery = ctx.recovery
+  if (recovery.mode === 'fixed' || !recovery.onTaskOutcome) return false
+
+  const trigger = verification?.verdict === 'rejected'
+    ? 'verification_rejected' as const
+    : result.success
+      ? 'success' as const
+      : 'failure' as const
+
+  // A patch may have been durably committed immediately before a crash while
+  // this trigger task was still in_progress. Restore resets the task, so do not
+  // append the same repair a second time when it settles again.
+  if (queue.getPlanRevisions().some((revision) =>
+    revision.triggerTaskId === task.id && revision.trigger === trigger)) {
+    ctx.config.onProgress?.({
+      type: 'recovery_decision',
+      task: task.id,
+      data: { decision: 'already_applied', trigger, planRevision: queue.getPlanRevision() },
+    })
+    return false
+  }
+
+  const tokenUsed = ctx.cumulativeUsage.input_tokens + ctx.cumulativeUsage.output_tokens
+  const outcome = buildTaskOutcome({
+    queue,
+    task: queue.get(task.id) ?? task,
+    result,
+    verification,
+    ...(ctx.maxTokenBudget !== undefined
+      ? { tokenBudgetRemaining: Math.max(0, ctx.maxTokenBudget - tokenUsed) }
+      : {}),
+    ...(ctx.maxCostBudget !== undefined
+      ? { costBudgetRemaining: Math.max(0, ctx.maxCostBudget - ctx.cumulativeCost) }
+      : {}),
+  })
+
+  const policySpan = ctx.traceRuntime?.startSpan({
+    kind: 'callback',
+    name: 'recovery_policy_callback',
+    parent: ctx.taskSpans.get(task.id) ?? ctx.traceRuntime?.root,
+    attributes: {
+      'oma.callback.name': 'onTaskOutcome',
+      'oma.task.id': task.id,
+      'oma.plan.trigger': trigger,
+    },
+  })
+  let patch
+  try {
+    patch = await recovery.onTaskOutcome(outcome)
+  } catch (error) {
+    const classified = classifyRunFailure(error, { kind: 'callback' })
+    policySpan?.end({ status: classified.status, error: classified.errorInfo })
+    ctx.config.onProgress?.({
+      type: 'error',
+      task: task.id,
+      data: { kind: 'recovery_policy_failed', error },
+    })
+    return false
+  }
+  policySpan?.event('recovery_decision', { 'oma.recovery.proposed': patch !== undefined })
+  policySpan?.end({ status: statusOnly('ok') })
+  if (!patch) {
+    ctx.config.onProgress?.({
+      type: 'recovery_decision',
+      task: task.id,
+      data: { decision: 'no_patch', trigger, planRevision: queue.getPlanRevision() },
+    })
+    return false
+  }
+
+  if (queue.getPlanRevision() >= recovery.maxPlanRevisions) {
+    ctx.config.onProgress?.({
+      type: 'warning',
+      task: task.id,
+      data: {
+        code: 'RECOVERY_REVISION_LIMIT',
+        maxPlanRevisions: recovery.maxPlanRevisions,
+      },
+    })
+    return false
+  }
+  const addedSoFar = countAddedTasks(queue.getPlanRevisions())
+  const requestedAdded = patch.addTasks?.length ?? 0
+  if (addedSoFar + requestedAdded > recovery.maxAddedTasks) {
+    ctx.config.onProgress?.({
+      type: 'warning',
+      task: task.id,
+      data: {
+        code: 'RECOVERY_ADDED_TASK_LIMIT',
+        maxAddedTasks: recovery.maxAddedTasks,
+        requestedAdded,
+        addedSoFar,
+      },
+    })
+    return false
+  }
+  const signature = planPatchSignature(patch)
+  if (ctx.recoveryPatchSignatures.has(signature)) {
+    ctx.config.onProgress?.({
+      type: 'warning',
+      task: task.id,
+      data: { code: 'RECOVERY_PATCH_REPEATED' },
+    })
+    return false
+  }
+
+  try {
+    validatePlanPatchEligibility(patch, queue, ctx.team.getAgents(), {
+      defaultProvider: ctx.config.defaultProvider,
+      defaultToolPreset: ctx.config.defaultToolPreset,
+    })
+  } catch (error) {
+    ctx.config.onProgress?.({
+      type: 'warning',
+      task: task.id,
+      data: { code: 'RECOVERY_PATCH_INELIGIBLE', error },
+    })
+    return false
+  }
+
+  if (recovery.onPlanPatch) {
+    const approvalSpan = ctx.traceRuntime?.startSpan({
+      kind: 'callback',
+      name: 'plan_patch_approval_callback',
+      parent: ctx.taskSpans.get(task.id) ?? ctx.traceRuntime?.root,
+      attributes: {
+        'oma.callback.name': 'onPlanPatch',
+        'oma.task.id': task.id,
+        'oma.plan.trigger': trigger,
+      },
+    })
+    let approved = false
+    try {
+      approved = await recovery.onPlanPatch(patch, outcome)
+    } catch (error) {
+      const classified = classifyRunFailure(error, { kind: 'callback' })
+      approvalSpan?.end({ status: classified.status, error: classified.errorInfo })
+      ctx.config.onProgress?.({
+        type: 'error',
+        task: task.id,
+        data: { kind: 'recovery_approval_failed', error },
+      })
+      return false
+    }
+    approvalSpan?.event('approval_decision', { 'oma.approval.approved': approved })
+    approvalSpan?.end({ status: statusOnly(approved ? 'ok' : 'rejected') })
+    if (!approved) {
+      ctx.config.onProgress?.({
+        type: 'recovery_decision',
+        task: task.id,
+        data: { decision: 'rejected', trigger, planRevision: queue.getPlanRevision() },
+      })
+      return false
+    }
+  }
+
+  const revisionSpan = ctx.traceRuntime?.startSpan({
+    kind: 'plan',
+    name: 'apply_plan_revision',
+    parent: ctx.taskSpans.get(task.id) ?? ctx.traceRuntime.root,
+    attributes: {
+      'oma.plan.revision.previous': queue.getPlanRevision(),
+      'oma.plan.trigger': trigger,
+      'oma.task.id': task.id,
+    },
+  })
+
+  let applied
+  try {
+    applied = queue.applyPlanPatch(patch, task.id, trigger)
+  } catch (error) {
+    const classified = classifyRunFailure(error, { kind: 'validation' })
+    revisionSpan?.end({ status: classified.status, error: classified.errorInfo })
+    ctx.config.onProgress?.({
+      type: 'warning',
+      task: task.id,
+      data: { code: 'RECOVERY_PATCH_INVALID', error },
+    })
+    return false
+  }
+
+  const durable = await saveRunCheckpoint(queue, ctx)
+  if (!durable && ctx.checkpoint) {
+    queue.restorePlanSnapshot(applied.before)
+    revisionSpan?.end({
+      status: statusOnly('error', 'Plan revision checkpoint failed.'),
+      error: {
+        kind: 'store',
+        code: 'PLAN_REVISION_NOT_DURABLE',
+        message: 'Plan revision was rolled back because its checkpoint failed.',
+      },
+    })
+    ctx.config.onProgress?.({
+      type: 'warning',
+      task: task.id,
+      data: {
+        code: 'PLAN_REVISION_NOT_DURABLE',
+        revision: applied.revision.version,
+      },
+    })
+    return false
+  }
+
+  ctx.recoveryPatchSignatures.add(signature)
+  queue.publishPlanRevision(applied.revision)
+  const tasks = queue.list()
+  ctx.taskById.clear()
+  ctx.taskLeafById.clear()
+  for (const candidate of tasks) {
+    ctx.taskById.set(candidate.id, candidate)
+    ctx.taskLeafById.set(candidate.id, isLeafTask(candidate, tasks))
+  }
+  revisionSpan?.event('plan_revision_applied', {
+    'oma.plan.revision': applied.revision.version,
+    'oma.plan.added_tasks': Object.keys(applied.revision.addedTasks).length,
+    'oma.plan.superseded_tasks': applied.revision.supersededTaskIds.length,
+    'oma.plan.retargeted_tasks': applied.revision.retargetedTasks.length,
+  })
+  revisionSpan?.end({
+    status: statusOnly('ok'),
+    attributes: { 'oma.plan.revision': applied.revision.version },
+  })
+  ctx.config.onProgress?.({
+    type: 'plan_revision',
+    task: task.id,
+    data: applied.revision,
+  })
+  ctx.config.onProgress?.({
+    type: 'recovery_decision',
+    task: task.id,
+    data: {
+      decision: 'applied',
+      trigger,
+      planRevision: applied.revision.version,
+    },
+  })
+  return true
+}
+
 /**
  * Execute all tasks in `queue` using agents in `pool`, respecting dependencies
  * and running independent tasks in parallel.
@@ -289,6 +545,9 @@ export async function executeQueue(
 ): Promise<void> {
   const { team, pool, scheduler, config } = ctx
   const legacyRoundMode = config.onApproval !== undefined
+  if (legacyRoundMode && ctx.recovery.mode !== 'fixed') {
+    throw new Error('Runtime recovery is incompatible with legacy onApproval round scheduling.')
+  }
   const readyTaskIds = new Set<string>()
   const inFlight = new Map<string, Promise<void>>()
   const dispatchErrors: unknown[] = []
@@ -901,12 +1160,17 @@ export async function executeQueue(
           // queue, shared memory, progress events, and agentResults as one consistent
           // result. Judge usage is charged to the same parent budget as the rest of the run.
           let effective = result
+          let verification: TaskVerificationOutcome | undefined
           if (task.verify && !ctx.budgetExceededTriggered) {
-            effective = await runTaskVerify(task, assignee, result, sharedMem, ctx)
+            const verified = await runTaskVerify(task, assignee, result, sharedMem, ctx)
+            effective = verified.result
+            verification = verified.verification
           }
 
           // Reflect the verified result in the per-task record the caller receives.
           ctx.agentResults.set(`${assignee}:${task.id}`, effective)
+
+          await applyRecoveryAtOutcome(queue, task, effective, verification, ctx)
 
           // Persist result into shared memory so other agents can read it
           if (sharedMem) {
@@ -940,6 +1204,7 @@ export async function executeQueue(
             ...(taskLegacyEvent ? { legacyEvent: { ...taskLegacyEvent, success: effective.success } } : {}),
           })
         } else {
+          await applyRecoveryAtOutcome(queue, task, result, undefined, ctx)
           queue.fail(task.id, result.output)
           taskSpan?.end({
             status: result.status ?? statusOnly('error', result.output),

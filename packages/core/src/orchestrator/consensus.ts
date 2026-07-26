@@ -325,7 +325,14 @@ export async function runTaskVerify(
   result: AgentRunResult,
   sharedMem: ReturnType<Team['getSharedMemoryInstance']>,
   ctx: RunContext,
-): Promise<AgentRunResult> {
+): Promise<{
+  readonly result: AgentRunResult
+  readonly verification: {
+    readonly verdict: 'accepted' | 'rejected'
+    readonly dissent: readonly string[]
+    readonly rounds: number
+  }
+}> {
   const verify = task.verify!
   const { team, config } = ctx
   const assigneeConfig = team.getAgents().find((a) => a.name === assignee)
@@ -415,8 +422,15 @@ export async function runTaskVerify(
   const useRevision =
     consensus.verdict === 'accepted' && consensus.answer && consensus.answer !== result.output
   return {
-    ...result,
-    output: useRevision ? consensus.answer : result.output,
-    tokenUsage: addUsage(result.tokenUsage, consensus.tokenUsage),
+    result: {
+      ...result,
+      output: useRevision ? consensus.answer : result.output,
+      tokenUsage: addUsage(result.tokenUsage, consensus.tokenUsage),
+    },
+    verification: {
+      verdict: consensus.verdict,
+      dissent: [...consensus.dissent],
+      rounds: consensus.rounds,
+    },
   }
 }

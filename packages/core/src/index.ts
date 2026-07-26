@@ -327,6 +327,14 @@ export type {
   RunTeamOptions,
   RunTasksOptions,
   RunTaskSpec,
+  PlanPatchTaskSpec,
+  PlanPatchRetarget,
+  PlanPatch,
+  PlanRevision,
+  TaskVerificationOutcome,
+  TaskOutcome,
+  Replanner,
+  RecoveryOptions,
   TaskMetadata,
   TaskRequirements,
   RestoreOptions,
@@ -361,6 +369,8 @@ export type {
   CheckpointRunIdentity,
   CompletedTaskCheckpoint,
   TaskQueueSnapshot,
+  TaskQueueSnapshotV1,
+  TaskQueueSnapshotV2,
   TaskSnapshot,
 
   // Trace

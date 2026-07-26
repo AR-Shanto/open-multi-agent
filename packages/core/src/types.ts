@@ -1164,6 +1164,103 @@ export interface RunTaskSpec {
   readonly verify?: ConsensusVerifyOptions
 }
 
+/** One task appended by an opt-in runtime plan repair. */
+export interface PlanPatchTaskSpec extends RunTaskSpec {
+  /**
+   * Patch-local stable key. Dependencies of another appended task may refer to
+   * this key; dependencies on the existing graph must use a task id.
+   */
+  readonly key: string
+}
+
+/** Reassign a task that has not started. */
+export interface PlanPatchRetarget {
+  readonly taskId: string
+  readonly assignee: string
+}
+
+/**
+ * Append-only repair of the not-yet-executed portion of a task graph.
+ *
+ * Existing topology is immutable. Replacing a branch means superseding its
+ * pending/blocked nodes and appending replacement tasks with new dependencies.
+ */
+export interface PlanPatch {
+  readonly reason: string
+  readonly addTasks?: readonly PlanPatchTaskSpec[]
+  readonly retargetPending?: readonly PlanPatchRetarget[]
+  readonly supersedePending?: readonly string[]
+}
+
+/** Accepted description of one runtime plan repair. */
+export interface PlanRevision {
+  readonly id: string
+  readonly version: number
+  readonly triggerTaskId: string
+  readonly trigger: 'success' | 'failure' | 'verification_rejected'
+  readonly reason: string
+  readonly addedTasks: Readonly<Record<string, string>>
+  readonly retargetedTasks: readonly PlanPatchRetarget[]
+  readonly supersededTaskIds: readonly string[]
+  readonly createdAt: string
+}
+
+/** Verification facts exposed to a recovery policy without judge credentials. */
+export interface TaskVerificationOutcome {
+  readonly verdict: 'accepted' | 'rejected'
+  readonly dissent: readonly string[]
+  readonly rounds: number
+}
+
+/** Stable facts available at the task-outcome recovery barrier. */
+export interface TaskOutcome {
+  readonly kind: 'success' | 'failure' | 'verification_rejected'
+  readonly task: Readonly<Task>
+  readonly result: Readonly<AgentRunResult>
+  readonly verification?: TaskVerificationOutcome
+  readonly planRevision: number
+  readonly tasks: readonly Readonly<Task>[]
+  readonly tokenBudgetRemaining?: number
+  readonly costBudgetRemaining?: number
+}
+
+/** Policy object that can propose an append-only repair at a task outcome barrier. */
+export interface Replanner {
+  readonly name?: string
+  replan(
+    outcome: TaskOutcome,
+  ): PlanPatch | undefined | Promise<PlanPatch | undefined>
+}
+
+/**
+ * Opt-in runtime plan repair. Omitted or `mode: 'fixed'` preserves the exact
+ * existing DAG lifecycle.
+ */
+export interface RecoveryOptions {
+  readonly mode?: 'fixed' | 'repairable'
+  /**
+   * Called before the triggering task is completed or failed, so no dependent
+   * can be dispatched ahead of an accepted patch.
+   */
+  readonly onTaskOutcome?: (
+    outcome: TaskOutcome,
+  ) => PlanPatch | undefined | Promise<PlanPatch | undefined>
+  /**
+   * First-class replanner policy. Mutually exclusive with `onTaskOutcome`.
+   * The application owns any external I/O performed by a custom replanner.
+   */
+  readonly replanner?: Replanner
+  /** Approval gate for a validated patch. Omitted means the policy owns approval. */
+  readonly onPlanPatch?: (
+    patch: Readonly<PlanPatch>,
+    outcome: TaskOutcome,
+  ) => boolean | Promise<boolean>
+  /** Maximum accepted revisions in one run. Default `3`. */
+  readonly maxPlanRevisions?: number
+  /** Maximum cumulative tasks appended by revisions. Default `20`. */
+  readonly maxAddedTasks?: number
+}
+
 /** Per-call options for {@link OpenMultiAgent.runTasks}. */
 export interface RunTasksOptions extends RunIdentityOptions {
   readonly abortSignal?: AbortSignal
@@ -1194,6 +1291,11 @@ export interface RunTasksOptions extends RunIdentityOptions {
    * coordinator model selection is unchanged.
    */
   readonly modelRouting?: ModelRoutingPolicy
+  /**
+   * Opt-in runtime repair policy. `runFromPlan()` rejects non-fixed recovery so
+   * a frozen plan remains an exact replay contract.
+   */
+  readonly recovery?: RecoveryOptions
 }
 
 /**
@@ -1431,6 +1533,8 @@ export interface TeamRunResult extends RunOutcomeFields {
   readonly governanceReason?: GovernanceUnsatisfiedReason
   readonly goal?: string
   readonly tasks?: readonly TaskExecutionRecord[]
+  /** Accepted append-only runtime plan revisions, in application order. */
+  readonly planRevisions?: readonly PlanRevision[]
   /**
    * True when the run was a plan-only invocation (`runTeam(team, goal, { planOnly: true })`).
    * The coordinator decomposed the goal but no task agents executed.
@@ -1572,6 +1676,10 @@ export interface TaskExecutionRecord {
   readonly requires?: TaskRequirements
   /** Verify config attached to this task, if any. Populated in `planOnly` results for inspection. */
   readonly verify?: ConsensusVerifyOptions
+  /** Plan revision that logically superseded this unstarted task. */
+  readonly supersededByRevision?: number
+  /** Plan revision that repaired this task's failed/rejected outcome. */
+  readonly recoveredByRevision?: number
   readonly metrics?: TaskExecutionMetrics
 }
 
@@ -1619,6 +1727,10 @@ export interface Task {
    * parent `maxTokenBudget`. Tasks without `verify` run unchanged.
    */
   readonly verify?: ConsensusVerifyOptions
+  /** Plan revision that logically superseded this unstarted task. */
+  readonly supersededByRevision?: number
+  /** Plan revision that repaired this task's failed/rejected outcome. */
+  readonly recoveredByRevision?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -1639,6 +1751,8 @@ export interface OrchestratorEvent {
     | 'task_complete'
     | 'task_skipped'
     | 'task_retry'
+    | 'plan_revision'
+    | 'recovery_decision'
     | 'budget_exceeded'
     | 'message'
     | 'warning'
@@ -1740,6 +1854,8 @@ export interface OrchestratorConfig {
    * and `restore`. Per-call options override this value. Defaults to off.
    */
   readonly checkpoint?: boolean | CheckpointOptions
+  /** Default opt-in runtime repair policy. Per-run recovery replaces it. */
+  readonly recovery?: RecoveryOptions
   /**
    * Fallback tool grant for agents that declare neither {@link AgentConfig.tools}
    * nor {@link AgentConfig.toolPreset}. Built-in tools are opt-in (default-deny):
@@ -1936,10 +2052,12 @@ export interface TaskSnapshot {
   readonly maxRetries?: number
   readonly retryDelayMs?: number
   readonly retryBackoff?: number
+  readonly supersededByRevision?: number
+  readonly recoveredByRevision?: number
 }
 
-/** Serializable state of a {@link TaskQueue}. */
-export interface TaskQueueSnapshot {
+/** Legacy serializable state of a {@link TaskQueue}. */
+export interface TaskQueueSnapshotV1 {
   readonly version: 1
   readonly tasks: readonly TaskSnapshot[]
   readonly pending: readonly string[]
@@ -1949,6 +2067,23 @@ export interface TaskQueueSnapshot {
   readonly blocked: readonly string[]
   readonly skipped: readonly string[]
 }
+
+/** Serializable adaptive-plan state of a {@link TaskQueue}. */
+export interface TaskQueueSnapshotV2 {
+  readonly version: 2
+  readonly tasks: readonly TaskSnapshot[]
+  readonly pending: readonly string[]
+  readonly inProgress: readonly string[]
+  readonly completed: readonly string[]
+  readonly failed: readonly string[]
+  readonly blocked: readonly string[]
+  readonly skipped: readonly string[]
+  readonly planRevision: number
+  readonly planRevisions: readonly PlanRevision[]
+}
+
+/** Serializable state of a {@link TaskQueue}. */
+export type TaskQueueSnapshot = TaskQueueSnapshotV1 | TaskQueueSnapshotV2
 
 /** Result recorded for a completed task inside a checkpoint. */
 export interface CompletedTaskCheckpoint {
@@ -1963,7 +2098,7 @@ export interface CompletedTaskCheckpoint {
 }
 
 interface CheckpointSnapshotBase {
-  readonly mode: 'runTeam' | 'runTasks'
+  readonly mode: 'runTeam' | 'runTasks' | 'runFromPlan'
   readonly createdAt: string
   /** Validated per-run metadata inherited by future restore attempts. */
   readonly metadata?: Readonly<Record<string, TraceAttributeValue>>

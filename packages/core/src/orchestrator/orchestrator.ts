@@ -50,6 +50,7 @@ import type {
   ConsensusResult,
   CoordinatorConfig,
   PlanArtifact,
+  PlanRevision,
   PlanTaskArtifact,
   OrchestratorConfig,
   OrchestratorEvent,
@@ -154,6 +155,7 @@ import {
   type ConsequentialConfirmationState,
 } from './consequential.js'
 import { runConsensusCore, applyConsensusDefaults, type ConsensusAgentDefaults } from './consensus.js'
+import { resolveRecoveryOptions } from './recovery.js'
 import {
   createOnlineEvaluator,
   NOOP_ONLINE_EVALUATION,
@@ -227,8 +229,8 @@ function resolveRunBudgets(
  */
 export class OpenMultiAgent {
   private readonly config: Required<
-    Omit<OrchestratorConfig, 'onApproval' | 'onTaskDispatch' | 'onAgentStream' | 'onPlanReady' | 'onProgress' | 'onTrace' | 'onToolCall' | 'observability' | 'evaluation' | 'defaultBaseURL' | 'defaultApiKey' | 'maxTokenBudget' | 'maxCostBudget' | 'estimateCost' | 'defaultToolPreset' | 'checkpoint'>
-  > & Pick<OrchestratorConfig, 'onApproval' | 'onTaskDispatch' | 'onAgentStream' | 'onPlanReady' | 'onProgress' | 'onTrace' | 'onToolCall' | 'observability' | 'evaluation' | 'defaultBaseURL' | 'defaultApiKey' | 'maxTokenBudget' | 'maxCostBudget' | 'estimateCost' | 'defaultToolPreset' | 'checkpoint'>
+    Omit<OrchestratorConfig, 'onApproval' | 'onTaskDispatch' | 'onAgentStream' | 'onPlanReady' | 'onProgress' | 'onTrace' | 'onToolCall' | 'observability' | 'evaluation' | 'defaultBaseURL' | 'defaultApiKey' | 'maxTokenBudget' | 'maxCostBudget' | 'estimateCost' | 'defaultToolPreset' | 'checkpoint' | 'recovery'>
+  > & Pick<OrchestratorConfig, 'onApproval' | 'onTaskDispatch' | 'onAgentStream' | 'onPlanReady' | 'onProgress' | 'onTrace' | 'onToolCall' | 'observability' | 'evaluation' | 'defaultBaseURL' | 'defaultApiKey' | 'maxTokenBudget' | 'maxCostBudget' | 'estimateCost' | 'defaultToolPreset' | 'checkpoint' | 'recovery'>
 
   private readonly teams: Map<string, Team> = new Map()
   private readonly fallbackCheckpointStore = new InMemoryStore()
@@ -294,6 +296,7 @@ export class OpenMultiAgent {
       estimateCost: config.estimateCost,
       defaultToolPreset: config.defaultToolPreset,
       checkpoint: config.checkpoint,
+      recovery: config.recovery,
       onApproval: config.onApproval,
       onTaskDispatch: config.onTaskDispatch,
       onPlanReady: config.onPlanReady,
@@ -1067,6 +1070,8 @@ export class OpenMultiAgent {
       modelRouting: options?.modelRouting,
       taskById: new Map(queue.list().map((task) => [task.id, task])),
       taskLeafById: new Map(queue.list().map((task) => [task.id, isLeafTask(task, queue.list())])),
+      recovery: resolveRecoveryOptions(this.config.recovery, options?.recovery),
+      recoveryPatchSignatures: new Set(),
     }
 
     const planTasks = queue.list()
@@ -1169,6 +1174,8 @@ export class OpenMultiAgent {
       retryDelayMs: task.retryDelayMs,
       retryBackoff: task.retryBackoff,
       verify: task.verify,
+      supersededByRevision: task.supersededByRevision,
+      recoveredByRevision: task.recoveredByRevision,
       metrics: taskMetrics.get(task.id),
     }))
 
@@ -1197,7 +1204,14 @@ export class OpenMultiAgent {
         ctx.outcomeErrorInfo = classified.errorInfo
       }
       return finish(this.buildTeamRunResult(
-        agentResults, identity, goal, taskRecords, ctx.outcomeStatus, ctx.outcomeErrorInfo,
+        agentResults,
+        identity,
+        goal,
+        taskRecords,
+        ctx.outcomeStatus,
+        ctx.outcomeErrorInfo,
+        false,
+        queue.getPlanRevisions(),
       ))
     }
     agentResults.set('coordinator', synthesis.result)
@@ -1209,7 +1223,14 @@ export class OpenMultiAgent {
     // buildTeamRunResult, so we do not increment completedTaskCount here.
 
     return finish(this.buildTeamRunResult(
-      agentResults, identity, goal, taskRecords, ctx.outcomeStatus, ctx.outcomeErrorInfo,
+      agentResults,
+      identity,
+      goal,
+      taskRecords,
+      ctx.outcomeStatus,
+      ctx.outcomeErrorInfo,
+      false,
+      queue.getPlanRevisions(),
     ))
   }
 
@@ -1272,6 +1293,9 @@ export class OpenMultiAgent {
     options?: RunTasksOptions,
   ): Promise<TeamRunResult> {
     const pendingEvaluation = this.beginOnlineEvaluation(plan)
+    if (resolveRecoveryOptions(this.config.recovery, options?.recovery).mode !== 'fixed') {
+      throw new Error('runFromPlan requires fixed recovery so the frozen plan remains exact.')
+    }
     if (plan.version !== 1) {
       throw new Error(`Unsupported plan artifact version: ${String(plan.version)}`)
     }
@@ -1283,6 +1307,12 @@ export class OpenMultiAgent {
       throw new Error(`Invalid plan artifact: ${validation.errors.join(' ')}`)
     }
     queue.addBatch(tasks)
+    const activeCheckpoint = this.createActiveCheckpoint(
+      team,
+      options?.checkpoint ?? this.config.checkpoint,
+      'runFromPlan',
+      plan.goal,
+    )
 
     return this.executeExplicitTaskQueue(
       team,
@@ -1290,7 +1320,7 @@ export class OpenMultiAgent {
       options,
       plan.goal,
       undefined,
-      undefined,
+      activeCheckpoint,
       undefined,
       undefined,
       undefined,
@@ -1385,6 +1415,9 @@ export class OpenMultiAgent {
         )
       }
       if (this.isPlanArtifact(tasksOrOptions)) {
+        if (resolveRecoveryOptions(this.config.recovery, options?.recovery).mode !== 'fixed') {
+          throw new Error('restore from a plan artifact requires fixed recovery so the plan remains exact.')
+        }
         const queue = new TaskQueue()
         const tasks = this.tasksFromPlan(tasksOrOptions)
         const validation = validateTaskDependencies(tasks)
@@ -1425,6 +1458,13 @@ export class OpenMultiAgent {
           startedAtMs: evaluationStartedAtMs,
         },
       )
+    }
+
+    if (
+      snapshot.mode === 'runFromPlan'
+      && resolveRecoveryOptions(this.config.recovery, options?.recovery).mode !== 'fixed'
+    ) {
+      throw new Error('restore of a runFromPlan checkpoint requires fixed recovery so the plan remains exact.')
     }
 
     const sharedMem = team.getSharedMemoryInstance()
@@ -1855,6 +1895,8 @@ export class OpenMultiAgent {
       modelRouting: options?.modelRouting,
       taskById: new Map(queue.list().map((task) => [task.id, task])),
       taskLeafById: new Map(queue.list().map((task) => [task.id, isLeafTask(task, queue.list())])),
+      recovery: resolveRecoveryOptions(this.config.recovery, options?.recovery),
+      recoveryPatchSignatures: new Set(),
     }
 
     await executeQueue(queue, ctx)
@@ -1934,6 +1976,8 @@ export class OpenMultiAgent {
       retryDelayMs: task.retryDelayMs,
       retryBackoff: task.retryBackoff,
       verify: task.verify,
+      supersededByRevision: task.supersededByRevision,
+      recoveredByRevision: task.recoveredByRevision,
       metrics: ctx.taskMetrics.get(task.id),
     }))
 
@@ -1944,6 +1988,8 @@ export class OpenMultiAgent {
       taskRecords,
       ctx.outcomeStatus,
       ctx.outcomeErrorInfo,
+      false,
+      queue.getPlanRevisions(),
     )
     const resultWithRouting = {
       ...result,
@@ -2065,11 +2111,13 @@ export class OpenMultiAgent {
     forcedStatus?: RunStatus,
     forcedErrorInfo?: StructuredTraceError,
     allowIncompleteTasks = false,
+    planRevisions?: readonly PlanRevision[],
   ): TeamRunResult {
     let totalUsage: TokenUsage = ZERO_USAGE
     let overallSuccess = true
     const collapsed = new Map<string, AgentRunResult>()
     const taskResults = new Map<string, AgentRunResult>()
+    const taskRecordsById = new Map((tasks ?? []).map((task) => [task.id, task]))
 
     for (const task of tasks ?? []) {
       if (!task.assignee) continue
@@ -2083,7 +2131,10 @@ export class OpenMultiAgent {
       const agentName = key.includes(':') ? key.split(':')[0]! : key
 
       totalUsage = addUsage(totalUsage, result.tokenUsage)
-      if (!result.success) overallSuccess = false
+      const taskId = key.includes(':') ? key.slice(key.indexOf(':') + 1) : undefined
+      const recovered = taskId !== undefined
+        && taskRecordsById.get(taskId)?.recoveredByRevision !== undefined
+      if (!result.success && !recovered) overallSuccess = false
 
       const existing = collapsed.get(agentName)
       if (!existing) {
@@ -2117,11 +2168,17 @@ export class OpenMultiAgent {
 
     const metrics = computeRunMetrics(tasks)
 
-    const statuses = [...agentResults.values()]
-      .map((result) => result.status)
+    const statuses = [...agentResults.entries()]
+      .filter(([key]) => {
+        const taskId = key.includes(':') ? key.slice(key.indexOf(':') + 1) : undefined
+        return taskId === undefined
+          || taskRecordsById.get(taskId)?.recoveredByRevision === undefined
+      })
+      .map(([, result]) => result.status)
       .filter((status): status is RunStatus => status !== undefined)
     const firstStatus = (code: RunStatus['code']) => statuses.find((status) => status.code === code)
-    const taskFailed = tasks?.some((task) => task.status === 'failed') ?? false
+    const taskFailed = tasks?.some((task) =>
+      task.status === 'failed' && task.recoveredByRevision === undefined) ?? false
     const taskIncomplete = tasks?.some((task) =>
       task.status === 'pending' || task.status === 'in_progress' || task.status === 'blocked'
     ) ?? false
@@ -2144,6 +2201,7 @@ export class OpenMultiAgent {
       ...(errorInfo !== undefined ? { errorInfo } : {}),
       goal,
       tasks,
+      ...(planRevisions && planRevisions.length > 0 ? { planRevisions } : {}),
       agentResults: collapsed,
       taskResults,
       totalTokenUsage: totalUsage,
