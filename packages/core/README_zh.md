@@ -152,8 +152,9 @@ const orchestrator = new OpenMultiAgent({
 | `composite` | 按阻塞的下游任务数排列任务，经 `AgentSelector` 硬过滤后，最大化 `fitWeight * fit + loadWeight * (1 - normalizedCurrentLoad)` | 需要在一次决策中同时考虑关键度、能力匹配与当前负载 |
 
 Agent 可声明 `description`、`capabilities`、`costTier` 与 `latencyClass`，
-任务可通过 `requires` 声明硬性过滤条件；设置 `strictAssignees: true` 可在
-coordinator 计划引用 roster 之外的 Agent 时提前失败。权重语义、负载归一化、
+任务可通过 `requires` 声明硬性过滤条件。Coordinator 计划默认会在引用
+roster 之外的 Agent 时提前失败；仅在需要保留旧的自动重新分配行为时设置
+`strictAssignees: false`。权重语义、负载归一化、
 `NO_ELIGIBLE_AGENT` 与 `INVALID_ASSIGNEE` 行为、审批兼容与 progress 事件迁移
 见[任务调度与派发](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/task-scheduling.md)。
 

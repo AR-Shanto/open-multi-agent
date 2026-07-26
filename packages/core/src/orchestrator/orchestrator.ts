@@ -79,7 +79,7 @@ import { Team } from '../team/team.js'
 import { TaskQueue } from '../task/queue.js'
 import { Checkpoint } from '../memory/checkpoint.js'
 import { InMemoryStore } from '../memory/store.js'
-import { createTask, validateTaskDependencies } from '../task/task.js'
+import { validateTaskDependencies } from '../task/task.js'
 import { validateTaskMetadata } from '../task/metadata.js'
 import { Scheduler } from './scheduler.js'
 import { CostBudgetExceededError, TokenBudgetExceededError } from '../errors.js'
@@ -163,12 +163,13 @@ import {
 } from '../eval/online.js'
 
 import {
-  parseTaskSpecs,
   buildCoordinatorBaseConfig,
+  buildCoordinatorTaskSpecsSchema,
   buildDecompositionPrompt,
   runCoordinatorSynthesis,
   loadSpecsIntoQueue,
   findInvalidAssignees,
+  type ParsedTaskSpec,
 } from './coordinator.js'
 
 // ---------------------------------------------------------------------------
@@ -247,7 +248,7 @@ export class OpenMultiAgent {
    *   - `maxDelegationDepth`: 3
    *   - `schedulingStrategy`: `'dependency-first'`
    *   - `schedulingWeights`: `{ fit: 0.7, load: 0.3 }`
-   *   - `strictAssignees`: `false`
+   *   - `strictAssignees`: `true`
    *   - `defaultModel`:   `'claude-opus-4-6'`
    *   - `defaultProvider`: `'anthropic'`
    */
@@ -279,7 +280,7 @@ export class OpenMultiAgent {
       maxDelegationDepth: config.maxDelegationDepth ?? DEFAULT_MAX_DELEGATION_DEPTH,
       schedulingStrategy: config.schedulingStrategy ?? 'dependency-first',
       schedulingWeights: config.schedulingWeights ?? {},
-      strictAssignees: config.strictAssignees ?? false,
+      strictAssignees: config.strictAssignees ?? true,
       executionRouter: config.executionRouter ?? new DeterministicRouter(),
       defaultModel: config.defaultModel ?? DEFAULT_MODEL,
       defaultProvider: config.defaultProvider ?? 'anthropic',
@@ -860,7 +861,10 @@ export class OpenMultiAgent {
     )
 
     const decompositionPrompt = buildDecompositionPrompt(goal, agentConfigs)
-    const coordinatorAgent = buildAgent(coordinatorConfig)
+    const coordinatorAgent = buildAgent({
+      ...coordinatorConfig,
+      outputSchema: buildCoordinatorTaskSpecsSchema(agentConfigs, this.config.strictAssignees),
+    })
     const runId = identity.runId
     const coordinatorDecomposeSpanId = this.config.onTrace ? generateSpanId() : undefined
 
@@ -920,7 +924,32 @@ export class OpenMultiAgent {
     // ------------------------------------------------------------------
     // Step 2: Parse tasks from coordinator output
     // ------------------------------------------------------------------
-    const taskSpecs = parseTaskSpecs(decompositionResult.output)
+    if (!decompositionResult.success && decompositionResult.errorInfo?.kind !== 'validation') {
+      this.config.onProgress?.({
+        type: 'agent_complete',
+        agent: 'coordinator',
+        data: decompositionResult,
+      })
+      this.config.onProgress?.({
+        type: 'error',
+        data: {
+          code: 'COORDINATOR_DECOMPOSITION_FAILED',
+          error: decompositionResult.errorInfo,
+        },
+      })
+      return finish(this.buildTeamRunResult(
+        agentResults,
+        identity,
+        goal,
+        [],
+        decompositionResult.status ?? statusOnly('error'),
+        decompositionResult.errorInfo,
+      ))
+    }
+
+    const taskSpecs = decompositionResult.success && Array.isArray(decompositionResult.structured)
+      ? decompositionResult.structured as ParsedTaskSpec[]
+      : null
 
     const queue = new TaskQueue()
     const scheduler = this.createScheduler()
@@ -1001,16 +1030,33 @@ export class OpenMultiAgent {
         ))
       }
     } else {
-      // Coordinator failed to produce structured output — fall back to
-      // one task per agent using the goal as the description.
-      for (const agentConfig of agentConfigs) {
-        const task = createTask({
-          title: `${agentConfig.name}: ${goal.slice(0, 80)}`,
-          description: goal,
-          assignee: agentConfig.name,
-        })
-        queue.add(task)
-      }
+      // A coordinator plan is an execution boundary. Do not turn an invalid
+      // plan into a different topology: that could duplicate side effects.
+      const error = Object.assign(
+        new Error('Coordinator plan failed structured validation after repair.'),
+        { code: 'COORDINATOR_PLAN_INVALID' },
+      )
+      const classified = classifyRunFailure(error, { kind: 'validation' })
+      this.config.onProgress?.({
+        type: 'agent_complete',
+        agent: 'coordinator',
+        data: decompositionResult,
+      })
+      this.config.onProgress?.({
+        type: 'error',
+        data: {
+          code: 'COORDINATOR_PLAN_INVALID',
+          error: classified.errorInfo,
+        },
+      })
+      return finish(this.buildTeamRunResult(
+        agentResults,
+        identity,
+        goal,
+        [],
+        classified.status,
+        classified.errorInfo,
+      ))
     }
 
     // ------------------------------------------------------------------
