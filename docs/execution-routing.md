@@ -10,8 +10,9 @@ Execution Routing decides the execution topology for an automatic `runTeam()` ca
 2. Declared governance topology or `preferredUnderBudget` degradation policy.
 3. The per-run or orchestrator-level custom `executionRouter`.
 4. The built-in `DeterministicRouter`.
-5. When the default/fallback deterministic result is Single, the semantic
-   `TaskProfiler` and deterministic semantic policy.
+5. When `executionRouting.strategy` is `hybrid` and the default/fallback
+   deterministic result is Single, the semantic `TaskProfiler` and deterministic
+   semantic policy.
 
 Routers run only for automatic, non-`planOnly` topology selection. They never override an explicit mode, declared role topology, or governance budget policy. `governanceIntent: 'none'` retains automatic topology selection, while still counting as an explicit governance declaration for consequential-tool confirmation.
 
@@ -21,9 +22,9 @@ Single, Hybrid routing may profile that fallback candidate.
 
 ## Hybrid semantic routing
 
-Hybrid is the default strategy. It preserves the cheap deterministic Team
-decision and adds at most one no-tool model call only when that router would
-otherwise choose Single:
+Hybrid is opt-in. It preserves the cheap deterministic Team decision and adds
+at most one no-tool model call only when that router would otherwise choose
+Single:
 
 ```ts
 const orchestrator = new OpenMultiAgent({
@@ -158,9 +159,10 @@ deterministic legacy decision, semantic recommendation, actual topology, usage,
 and structured fallback state. The executed task topology, final tool grants,
 and `ExecutionReceipt` remain governance truth.
 
-## Deterministic compatibility mode
+## Deterministic default
 
-Use one line to restore the previous no-profiler behavior:
+Omitting `executionRouting` uses the no-profiler deterministic router. Set the
+strategy explicitly when you want configuration-level clarity:
 
 ```ts
 const orchestrator = new OpenMultiAgent({
@@ -168,10 +170,9 @@ const orchestrator = new OpenMultiAgent({
 })
 ```
 
-This makes no extra model call and retains the existing deterministic Router
-result and custom-Router fallback behavior. The compatibility path remains
-available for offline use, incident degradation, and the entire major release
-cycle.
+This makes no extra model call and retains deterministic Router results and
+custom-Router fallback behavior. Hybrid should be enabled only for providers
+and models that have passed the documented Shadow gate.
 
 Explicitly installing `new DeterministicRouter()` as `executionRouter` also
 makes that valid Router decision final under the precedence rules, so the
@@ -210,18 +211,11 @@ which router selected Single or Team. Router decisions and TaskProfiles cannot
 satisfy named-role or independent-review requirements; those facts continue to
 come from structured governance declarations and the executed topology.
 
-## Major-version migration
-
-This implementation is intended for the next major release because it changes
-automatic `runTeam()` from deterministic-only to Hybrid by default. In this
-code, Hybrid is already the runtime default. A short goal may therefore make
-one additional model call and upgrade from Single to Team, increasing latency,
-token use, and cost.
-Applications that require exact old call counts or fully offline routing should
-set `executionRouting: { strategy: 'deterministic' }` before upgrading.
+## Promotion criteria
 
 Shadow evaluation is a release-engineering technique, not a user-facing runtime
 mode: run fixed fixtures in CI and canaries, compare its recommendation without
-changing production topology, and promote only after the documented accuracy,
-invalid-output, cost, and latency gates pass. Online historical-success learning
-and Team-to-Single optimization are outside V1.
+changing production topology, and promote a provider/model to supported Hybrid
+use only after the documented accuracy, invalid-output, cost, and latency gates
+pass. Online historical-success learning and Team-to-Single optimization are
+outside V1.

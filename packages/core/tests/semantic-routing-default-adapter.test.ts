@@ -58,6 +58,7 @@ describe('semantic routing default adapter resolution', () => {
     const oma = new OpenMultiAgent({
       defaultProvider: 'openai',
       defaultModel: 'default-routing-model',
+      executionRouting: { strategy: 'hybrid' },
     })
     const team = oma.createTeam('default-adapter', {
       name: 'default-adapter',

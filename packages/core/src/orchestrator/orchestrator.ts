@@ -364,7 +364,7 @@ export class OpenMultiAgent {
       strictAssignees: config.strictAssignees ?? true,
       executionRouter: config.executionRouter ?? new DeterministicRouter(),
       executionRouting: {
-        strategy: config.executionRouting?.strategy ?? 'hybrid',
+        strategy: config.executionRouting?.strategy ?? 'deterministic',
         confidenceThreshold: config.executionRouting?.confidenceThreshold ?? 0.7,
         failurePolicy: config.executionRouting?.failurePolicy ?? 'fallback',
         ...(config.executionRouting?.profiler !== undefined
@@ -469,7 +469,7 @@ export class OpenMultiAgent {
       ?? this.config.executionRouting.timeoutMs
       ?? coordinator?.callTimeoutMs
     const resolved = {
-      strategy: override?.strategy ?? this.config.executionRouting.strategy ?? 'hybrid',
+      strategy: override?.strategy ?? this.config.executionRouting.strategy ?? 'deterministic',
       confidenceThreshold:
         override?.confidenceThreshold
         ?? this.config.executionRouting.confidenceThreshold

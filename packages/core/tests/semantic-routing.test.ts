@@ -97,10 +97,18 @@ function createRun(
 ) {
   const agentAdapter = adapter()
   const coordinatorAdapter = adapter(PLAN)
+  const {
+    executionRouting: extraExecutionRouting,
+    ...remainingConfig
+  } = extraConfig
   const oma = new OpenMultiAgent({
     defaultModel: 'mock-model',
-    executionRouting: { profiler: taskProfiler },
-    ...extraConfig,
+    ...remainingConfig,
+    executionRouting: {
+      strategy: 'hybrid',
+      profiler: taskProfiler,
+      ...extraExecutionRouting,
+    },
   })
   const team = oma.createTeam('semantic-routing', {
     name: 'semantic-routing',
@@ -229,6 +237,37 @@ describe('LLMTaskProfiler', () => {
       source: 'inferred',
     })
   })
+
+  it('disables DeepSeek V4 thinking so profiling returns within its output budget', async () => {
+    const mockAdapter = {
+      ...adapter(JSON.stringify({
+        evidenceSources: 'single',
+        independentReview: 'none',
+        conflictingObjectives: false,
+        sideEffectIntent: 'none',
+        permissionIsolation: 'none',
+        decomposable: false,
+        parallelizable: false,
+        complexity: 'low',
+        confidence: 0.95,
+        reasons: ['The task is a bounded classification request.'],
+      })),
+      name: 'deepseek',
+    }
+    const taskProfiler = new LLMTaskProfiler({
+      adapter: mockAdapter,
+      model: 'deepseek-v4-flash',
+    })
+
+    await taskProfiler.profile({
+      goal: 'Summarize this note.',
+      roster: [{ name: 'alpha', model: 'deepseek-v4-flash' }],
+    })
+
+    expect(mockAdapter.chat.mock.calls[0]?.[1]).toMatchObject({
+      extraBody: { thinking: { type: 'disabled' } },
+    })
+  })
 })
 
 describe('hybrid runTeam routing', () => {
@@ -266,7 +305,7 @@ describe('hybrid runTeam routing', () => {
     await sink.shutdown({ timeoutMs: 500 })
   })
 
-  it('is the default and upgrades only a deterministic Single to Team', async () => {
+  it('upgrades only a deterministic Single to Team when Hybrid is enabled', async () => {
     const taskProfiler = profiler(profile({ evidenceSources: 'multiple' }))
     const { run } = createRun(taskProfiler)
 
@@ -283,6 +322,24 @@ describe('hybrid runTeam routing', () => {
       actualMode: 'team',
       outcome: 'applied',
     })
+  })
+
+  it('defaults to deterministic routing without creating a profiler call', async () => {
+    const agentAdapter = adapter('hello')
+    const oma = new OpenMultiAgent({ defaultModel: 'mock-model' })
+    const team = oma.createTeam('default-deterministic', {
+      name: 'default-deterministic',
+      agents: [{ name: 'alpha', model: 'mock-model', adapter: agentAdapter }],
+    })
+
+    const result = await oma.runTeam(team, 'Say hello')
+
+    expect(agentAdapter.chat).toHaveBeenCalledOnce()
+    expect(result.routingDecision).toMatchObject({
+      mode: 'single',
+      routerVersion: 'deterministic-v1',
+    })
+    expect(result.semanticRoutingAssessment).toBeUndefined()
   })
 
   it('keeps deterministic Team without making a profiler call', async () => {
@@ -506,7 +563,7 @@ describe('hybrid runTeam routing', () => {
     const coordinatorAdapter = adapter(PLAN)
     const oma = new OpenMultiAgent({
       defaultModel: 'mock-model',
-      executionRouting: { profiler: taskProfiler },
+      executionRouting: { strategy: 'hybrid', profiler: taskProfiler },
     })
     const team = oma.createTeam('permission-boundaries', {
       name: 'permission-boundaries',
@@ -625,6 +682,7 @@ describe('hybrid runTeam routing', () => {
     const oma = new OpenMultiAgent({
       defaultModel: 'mock-model',
       executionRouting: {
+        strategy: 'hybrid',
         adapter: configuredAdapter,
         model: 'configured-routing-model',
       },
@@ -636,7 +694,11 @@ describe('hybrid runTeam routing', () => {
 
     await oma.runTeam(team, 'Say hello', {
       coordinator: { model: 'mock-model', adapter: coordinatorAdapter },
-      executionRouting: { adapter: perRunAdapter, model: 'per-run-routing-model' },
+      executionRouting: {
+        strategy: 'hybrid',
+        adapter: perRunAdapter,
+        model: 'per-run-routing-model',
+      },
     })
 
     expect(perRunAdapter.chat).toHaveBeenCalledOnce()
@@ -656,7 +718,10 @@ describe('hybrid runTeam routing', () => {
           : PLAN,
       ))
     const agentAdapter = adapter()
-    const oma = new OpenMultiAgent({ defaultModel: 'mock-model' })
+    const oma = new OpenMultiAgent({
+      defaultModel: 'mock-model',
+      executionRouting: { strategy: 'hybrid' },
+    })
     const team = oma.createTeam('coordinator-adapter-fallback', {
       name: 'coordinator-adapter-fallback',
       agents: [{ name: 'alpha', model: 'mock-model', adapter: agentAdapter }],
