@@ -185,7 +185,7 @@ Coordinator -> 任务 DAG -> Scheduler -> AgentPool
                     `-- 结果 -> 评测（离线 / 抽样，仅观察）
 ```
 
-Coordinator 只负责产生计划，Scheduler 负责执行顺序。Agent 通过记忆共享结果，checkpoint 与 trace 分别形成恢复和可观测路径。评测只观察已完成的结果，不会改变它们。详细契约见下方各子系统指南。
+默认情况下，Coordinator 只负责产生一次计划，Scheduler 负责执行顺序。当任务结果需要修改任务图中尚未执行的部分时，应用可以选择启用仅追加式自适应恢复。Agent 通过记忆共享结果，checkpoint 与 trace 分别形成恢复和可观测路径。评测只观察已完成的结果，不会改变它们。详细契约见下方各子系统指南。
 
 ## 示例
 
@@ -226,7 +226,7 @@ Coordinator 只负责产生计划，Scheduler 负责执行顺序。Agent 通过�
 | 限定工作量 | `maxTurns`、`timeoutMs`、`callTimeoutMs`、`contextStrategy`、`loopDetection` |
 | 控制成本 | `maxTokenBudget`；`maxCostBudget` + 应用自有 `estimateCost` |
 | 限制工具 | `tools` / `toolPreset`、`cwd` / `defaultCwd`、工具输出上限 |
-| 故障恢复 | 任务重试、checkpoint 与 `restore()` |
+| 故障恢复 | 任务重试、checkpoint、`restore()` 与可选的自适应计划修复 |
 | 人工把关 | `planOnly`、`onPlanReady` 与审批回调 |
 | 统一观测 | Trace sink、TraceStore、执行回执、Run Viewer，或可选 OTel adapter |
 
@@ -247,7 +247,7 @@ Core 已提供运行标识、trace sink、执行回执、可查询的内存/文�
 | 主题 | 指南 |
 |---|---|
 | 构建 agent | [Provider](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md)、[工具](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md)、[上下文](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/context-management.md) |
-| 稳定运行 | [评测](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation.md)、[Checkpoint & resume](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/checkpoint.md)、[执行路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md)、[模型路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)、[Consensus](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/consensus.md) |
+| 稳定运行 | [评测](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation.md)、[Checkpoint & resume](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/checkpoint.md)、[自适应恢复](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/adaptive-recovery.md)、[执行路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md)、[模型路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)、[Consensus](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/consensus.md) |
 | 控制流程 | [计划预览与回放](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/plan-replay.md)、[共享记忆](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/shared-memory.md)、[外部 agent](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/external-agents.md) |
 | 生产运维 | [可观测性](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md)、[CLI](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/cli.md)、[生产示例](examples/production/README.md) |
 
