@@ -161,18 +161,20 @@ const orchestrator = new OpenMultiAgent({
 
 | Strategy | Assignment behavior | Recommended when |
 |----------|---------------------|------------------|
-| `dependency-first` (default) | Assigns tasks that unblock the most downstream work first, rotating agents | The task graph has meaningful dependencies |
-| `round-robin` | Distributes tasks in queue order across the roster | Agents are interchangeable |
-| `least-busy` | Chooses the agent with the fewest active or newly assigned tasks | Task duration varies and load balance matters |
+| `dependency-first` (default) | Assigns tasks that unblock the most downstream work first, rotating eligible agents | The task graph has meaningful dependencies |
+| `round-robin` | Distributes tasks in queue order across eligible agents | Agents are interchangeable |
+| `least-busy` | Chooses the eligible agent with the fewest active or newly assigned tasks | Task duration varies and load balance matters |
 | `capability-match` | Filters explicit task requirements, then prefers declared capability tags before legacy keyword affinity | Tasks or agents declare differentiated requirements/capabilities |
-| `composite` | Ranks tasks by blocked dependents, hard-filters with `AgentSelector`, then maximizes `fitWeight * fit + loadWeight * (1 - normalizedCurrentLoad)` | Criticality, capability fit, and current load should influence one decision |
+| `composite` | Ranks tasks by blocked dependents, then maximizes fit and available capacity across eligible agents | Criticality, capability fit, and current load should influence one decision |
 
 Agents may declare `description`, `capabilities`, `costTier`, and
-`latencyClass`, and tasks may add hard `requires` constraints; set
-`strictAssignees: true` to fail fast when a coordinator plan names an agent
-outside the roster. Weight semantics, load normalization, `NO_ELIGIBLE_AGENT`
-and `INVALID_ASSIGNEE` behavior, approval compatibility, and progress-event
-migration are covered in
+`latencyClass`, and tasks may add hard `requires` constraints. All strategies
+fail before worker execution when those constraints cannot be satisfied.
+Coordinator plans also fail fast by default when they name an agent outside
+the roster; set `strictAssignees: false` only to retain legacy reassignment.
+Weight semantics, load normalization, `NO_ELIGIBLE_AGENT` and
+`INVALID_ASSIGNEE` behavior, approval compatibility, and progress-event migration
+are covered in
 [Task scheduling and dispatch](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/task-scheduling.md).
 
 ## Capabilities
@@ -203,7 +205,7 @@ Coordinator -> Task DAG -> Scheduler -> AgentPool
                     `-- results -> evaluation (offline / sampled, observe-only)
 ```
 
-The coordinator plans once; the scheduler owns execution order. Agents share results through memory, while checkpoints and traces form separate recovery and observability paths. Evaluation observes completed results and never changes them. Detailed contracts live in the linked subsystem guides below.
+The coordinator plans once by default; the scheduler owns execution order. Applications can opt into append-only adaptive recovery when task outcomes need to revise the unstarted part of the graph. Agents share results through memory, while checkpoints and traces form separate recovery and observability paths. Evaluation observes completed results and never changes them. Detailed contracts live in the linked subsystem guides below.
 
 ## Examples
 
@@ -244,7 +246,7 @@ See [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/d
 | Bound work | `maxTurns`, `timeoutMs`, `callTimeoutMs`, `contextStrategy`, `loopDetection` |
 | Control spend | `maxTokenBudget`; `maxCostBudget` + application-owned `estimateCost` |
 | Limit tools | `tools` / `toolPreset`, `cwd` / `defaultCwd`, tool-output caps |
-| Recover | Task retries, checkpointing, and `restore()` |
+| Recover | Task retries, checkpointing, `restore()`, and opt-in adaptive plan repair |
 | Review work | `planOnly`, `onPlanReady`, and approval callbacks |
 | Observe | Trace sinks, TraceStore, execution receipts, Run Viewer, or the optional OTel adapter |
 
@@ -265,7 +267,7 @@ See the [observability guide](https://github.com/open-multi-agent/open-multi-age
 | Area | Guides |
 |---|---|
 | Build agents | [Providers](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md), [tools](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md), [context](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/context-management.md) |
-| Run reliably | [Evaluation](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation.md), [checkpoint & resume](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/checkpoint.md), [execution routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md), [model routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md), [consensus](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/consensus.md) |
+| Run reliably | [Evaluation](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation.md), [checkpoint & resume](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/checkpoint.md), [adaptive recovery](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/adaptive-recovery.md), [execution routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md), [model routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md), [consensus](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/consensus.md) |
 | Control workflows | [Plan preview & replay](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/plan-replay.md), [shared memory](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/shared-memory.md), [external agents](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/external-agents.md) |
 | Operate | [Observability](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md), [CLI](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/cli.md), [production examples](examples/production/README.md) |
 

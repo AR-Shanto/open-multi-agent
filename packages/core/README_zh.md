@@ -145,15 +145,17 @@ const orchestrator = new OpenMultiAgent({
 
 | 策略 | 分配行为 | 适用场景 |
 |------|----------|----------|
-| `dependency-first`（默认） | 优先分配能解锁最多下游工作的任务，并轮转选择 Agent | 任务图存在明确依赖关系 |
-| `round-robin` | 按队列顺序在 Agent roster 中轮转分配 | Agent 能力可以互换 |
-| `least-busy` | 选择当前活跃任务或本批新分配任务最少的 Agent | 任务耗时差异较大，需要负载均衡 |
+| `dependency-first`（默认） | 优先分配能解锁最多下游工作的任务，并在合格 Agent 中轮转选择 | 任务图存在明确依赖关系 |
+| `round-robin` | 按队列顺序在合格 Agent 中轮转分配 | Agent 能力可以互换 |
+| `least-busy` | 选择当前活跃任务或本批新分配任务最少的合格 Agent | 任务耗时差异较大，需要负载均衡 |
 | `capability-match` | 先过滤显式任务要求，再优先匹配声明的能力标签，最后使用兼容的关键词亲和度 | 任务或 Agent 声明了有区分度的要求/能力 |
-| `composite` | 按阻塞的下游任务数排列任务，经 `AgentSelector` 硬过滤后，最大化 `fitWeight * fit + loadWeight * (1 - normalizedCurrentLoad)` | 需要在一次决策中同时考虑关键度、能力匹配与当前负载 |
+| `composite` | 按阻塞的下游任务数排列任务，再在合格 Agent 中综合选择匹配度与可用容量最优者 | 需要在一次决策中同时考虑关键度、能力匹配与当前负载 |
 
 Agent 可声明 `description`、`capabilities`、`costTier` 与 `latencyClass`，
-任务可通过 `requires` 声明硬性过滤条件；设置 `strictAssignees: true` 可在
-coordinator 计划引用 roster 之外的 Agent 时提前失败。权重语义、负载归一化、
+任务可通过 `requires` 声明硬约束。任何调度策略无法满足这些约束时，都会在
+worker 执行前失败。Coordinator 计划默认也会在引用
+roster 之外的 Agent 时提前失败；仅在需要保留旧的自动重新分配行为时设置
+`strictAssignees: false`。权重语义、负载归一化、
 `NO_ELIGIBLE_AGENT` 与 `INVALID_ASSIGNEE` 行为、审批兼容与 progress 事件迁移
 见[任务调度与派发](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/task-scheduling.md)。
 
@@ -185,7 +187,7 @@ Coordinator -> 任务 DAG -> Scheduler -> AgentPool
                     `-- 结果 -> 评测（离线 / 抽样，仅观察）
 ```
 
-Coordinator 只负责产生计划，Scheduler 负责执行顺序。Agent 通过记忆共享结果，checkpoint 与 trace 分别形成恢复和可观测路径。评测只观察已完成的结果，不会改变它们。详细契约见下方各子系统指南。
+默认情况下，Coordinator 只负责产生一次计划，Scheduler 负责执行顺序。当任务结果需要修改任务图中尚未执行的部分时，应用可以选择启用仅追加式自适应恢复。Agent 通过记忆共享结果，checkpoint 与 trace 分别形成恢复和可观测路径。评测只观察已完成的结果，不会改变它们。详细契约见下方各子系统指南。
 
 ## 示例
 
@@ -226,7 +228,7 @@ Coordinator 只负责产生计划，Scheduler 负责执行顺序。Agent 通过�
 | 限定工作量 | `maxTurns`、`timeoutMs`、`callTimeoutMs`、`contextStrategy`、`loopDetection` |
 | 控制成本 | `maxTokenBudget`；`maxCostBudget` + 应用自有 `estimateCost` |
 | 限制工具 | `tools` / `toolPreset`、`cwd` / `defaultCwd`、工具输出上限 |
-| 故障恢复 | 任务重试、checkpoint 与 `restore()` |
+| 故障恢复 | 任务重试、checkpoint、`restore()` 与可选的自适应计划修复 |
 | 人工把关 | `planOnly`、`onPlanReady` 与审批回调 |
 | 统一观测 | Trace sink、TraceStore、执行回执、Run Viewer，或可选 OTel adapter |
 
@@ -247,7 +249,7 @@ Core 已提供运行标识、trace sink、执行回执、可查询的内存/文�
 | 主题 | 指南 |
 |---|---|
 | 构建 agent | [Provider](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/providers.md)、[工具](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/tool-configuration.md)、[上下文](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/context-management.md) |
-| 稳定运行 | [评测](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation.md)、[Checkpoint & resume](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/checkpoint.md)、[执行路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md)、[模型路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)、[Consensus](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/consensus.md) |
+| 稳定运行 | [评测](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/evaluation.md)、[Checkpoint & resume](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/checkpoint.md)、[自适应恢复](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/adaptive-recovery.md)、[执行路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md)、[模型路由](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)、[Consensus](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/consensus.md) |
 | 控制流程 | [计划预览与回放](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/plan-replay.md)、[共享记忆](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/shared-memory.md)、[外部 agent](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/external-agents.md) |
 | 生产运维 | [可观测性](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/observability.md)、[CLI](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/cli.md)、[生产示例](examples/production/README.md) |
 

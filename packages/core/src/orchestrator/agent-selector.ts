@@ -10,6 +10,8 @@
 import type {
   AgentConfig,
   OrchestratorConfig,
+  Task,
+  TaskRequirementIssue,
   TaskRequirements,
 } from '../types.js'
 import type { SupportedProvider } from '../llm/adapter.js'
@@ -32,6 +34,8 @@ export interface AgentSelectorContext {
   readonly defaultToolPreset?: OrchestratorConfig['defaultToolPreset']
   /** Team workers register delegation; standalone selection does not. */
   readonly includeDelegateTool?: boolean
+  /** Resolve the effective worker config for one task before hard filtering. */
+  readonly resolveCandidate?: (task: Task, candidate: AgentConfig) => AgentConfig
 }
 
 export interface EligibleAgentScore {
@@ -216,4 +220,80 @@ export class AgentSelector {
       eligible,
     }
   }
+}
+
+export function hasExplicitTaskRequirements(
+  requires: TaskRequirements | undefined,
+): boolean {
+  return requires !== undefined && (
+    (requires.requiredTools?.length ?? 0) > 0
+    || (requires.requiredCapabilities?.length ?? 0) > 0
+    || requires.requiredBackend !== undefined
+    || requires.requiredProvider !== undefined
+  )
+}
+
+/**
+ * Validate every task's hard requirements before any task is dispatched.
+ *
+ * Unassigned tasks must have at least one eligible roster candidate. Explicitly
+ * assigned tasks are checked only against their named agent so assignment
+ * conflicts fail instead of being silently reassigned.
+ */
+export function validateTaskRequirements(
+  tasks: readonly Task[],
+  candidates: readonly AgentConfig[],
+  context: AgentSelectorContext = {},
+): readonly TaskRequirementIssue[] {
+  const selector = new AgentSelector()
+  const issues: TaskRequirementIssue[] = []
+
+  for (const task of tasks) {
+    if (
+      task.status === 'completed'
+      || task.status === 'failed'
+      || task.status === 'skipped'
+    ) continue
+    if (!hasExplicitTaskRequirements(task.requires)) continue
+
+    if (task.assignee !== undefined) {
+      const assignee = candidates.find((candidate) => candidate.name === task.assignee)
+      // Unknown assignees retain the existing INVALID_ASSIGNEE/not-found path.
+      if (!assignee) continue
+      const effectiveAssignee = context.resolveCandidate?.(task, assignee) ?? assignee
+      const selection = selector.select({
+        title: task.title,
+        description: task.description,
+        requires: task.requires,
+      }, [effectiveAssignee], context)
+      if (selection.error) {
+        issues.push({
+          code: 'ASSIGNEE_REQUIREMENTS_MISMATCH',
+          taskId: task.id,
+          taskTitle: task.title,
+          assignee: task.assignee,
+          reasons: selection.error.reasons,
+        })
+      }
+      continue
+    }
+
+    const effectiveCandidates = candidates.map((candidate) =>
+      context.resolveCandidate?.(task, candidate) ?? candidate)
+    const selection = selector.select({
+      title: task.title,
+      description: task.description,
+      requires: task.requires,
+    }, effectiveCandidates, context)
+    if (selection.error) {
+      issues.push({
+        code: 'NO_ELIGIBLE_AGENT',
+        taskId: task.id,
+        taskTitle: task.title,
+        reasons: selection.error.reasons,
+      })
+    }
+  }
+
+  return issues
 }

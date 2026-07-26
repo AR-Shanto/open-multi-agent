@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { Scheduler } from '../src/orchestrator/scheduler.js'
+import type { SchedulingStrategy } from '../src/orchestrator/scheduler.js'
 import { TaskQueue } from '../src/task/queue.js'
 import { createTask } from '../src/task/task.js'
 import type { AgentConfig, Task, TaskRequirements } from '../src/types.js'
@@ -67,7 +68,10 @@ describe('Scheduler: round-robin', () => {
 
   it('returns empty map when no agents', () => {
     const s = new Scheduler('round-robin')
-    const tasks = [pendingTask('t1')]
+    const tasks = [
+      pendingTask('t1'),
+      pendingTask('t2', { requires: {} }),
+    ]
     expect(s.schedule(tasks, []).size).toBe(0)
   })
 
@@ -258,6 +262,61 @@ describe('Scheduler: compatibility strategies', () => {
         .keys(),
     ][0]).toBe(critical.id)
   })
+
+  it.each([
+    'round-robin',
+    'least-busy',
+    'capability-match',
+    'dependency-first',
+    'composite',
+  ] satisfies SchedulingStrategy[])(
+    '%s applies hard requirements before strategy-specific ranking',
+    (strategy) => {
+      const scheduler = new Scheduler(strategy)
+      const agents: AgentConfig[] = [
+        {
+          ...agent('ineligible'),
+          capabilities: ['typescript'],
+          tools: ['file_read'],
+          provider: 'openai',
+        },
+        {
+          ...agent('eligible'),
+          capabilities: ['typescript'],
+          tools: ['file_edit'],
+          provider: 'anthropic',
+        },
+      ]
+      const task = pendingTask('Restricted', {
+        requires: {
+          requiredTools: ['file_edit'],
+          requiredCapabilities: ['typescript'],
+          requiredBackend: 'llm',
+          requiredProvider: 'anthropic',
+        },
+      })
+
+      expect(scheduler.schedule([task], agents).get(task.id)).toBe('eligible')
+    },
+  )
+
+  it.each([
+    'round-robin',
+    'least-busy',
+    'capability-match',
+    'dependency-first',
+    'composite',
+  ] satisfies SchedulingStrategy[])(
+    '%s fails closed when no agent satisfies hard requirements',
+    (strategy) => {
+      const task = pendingTask('Restricted', {
+        requires: { requiredCapabilities: ['missing'] },
+      })
+
+      expect(() => new Scheduler(strategy).schedule([task], [agent('worker')]))
+        .toThrow('NO_ELIGIBLE_AGENT')
+    },
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -325,7 +384,7 @@ describe('Scheduler: composite', () => {
     expect(loadOnly.get(task.id)).toBe('idle')
   })
 
-  it('warns and uses the explicit zero-fit load fallback when nobody is eligible', () => {
+  it('fails closed when nobody is eligible', () => {
     const warnings: unknown[] = []
     const s = new Scheduler('composite', {}, {
       onWarning: (warning) => warnings.push(warning),
@@ -340,16 +399,8 @@ describe('Scheduler: composite', () => {
       requires: { requiredCapabilities: ['missing'] },
     })
 
-    const assignments = s.schedule([busy, task], agents)
-
-    expect(assignments.get(task.id)).toBe('idle')
-    expect(warnings).toEqual([
-      expect.objectContaining({
-        code: 'NO_ELIGIBLE_AGENT',
-        taskId: task.id,
-        fallback: 'zero-fit-current-load',
-      }),
-    ])
+    expect(() => s.schedule([busy, task], agents)).toThrow('NO_ELIGIBLE_AGENT')
+    expect(warnings).toEqual([])
   })
 })
 

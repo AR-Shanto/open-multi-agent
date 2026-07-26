@@ -19,6 +19,7 @@ import type { AgentConfig, Task } from '../types.js'
 import type { TaskQueue } from '../task/queue.js'
 import {
   AgentSelector,
+  hasExplicitTaskRequirements,
   type AgentSelectorContext,
 } from './agent-selector.js'
 
@@ -61,6 +62,7 @@ export const DEFAULT_SCHEDULING_WEIGHTS: SchedulingWeights = {
   load: 0.3,
 }
 
+/** @deprecated Hard requirement failures are now fail-closed errors. */
 export interface SchedulerWarning {
   /** Stable machine-readable warning code inherited from AgentSelector. */
   readonly code: 'NO_ELIGIBLE_AGENT'
@@ -75,7 +77,7 @@ export interface SchedulerWarning {
 export interface SchedulerOptions {
   /** Per-field composite overrides; omitted fields use the documented defaults. */
   readonly weights?: Partial<SchedulingWeights>
-  /** Receives structured scheduler degradations without changing assignments. */
+  /** @deprecated Hard requirement failures are no longer downgraded to warnings. */
   readonly onWarning?: (warning: SchedulerWarning) => void
 }
 
@@ -187,11 +189,15 @@ export class Scheduler {
    * @returns A `Map<taskId, agentName>` for every unassigned pending task.
    */
   schedule(tasks: Task[], agents: AgentConfig[]): Map<string, string> {
-    if (agents.length === 0) return new Map()
-
     const unassigned = tasks.filter(
       (t) => t.status === 'pending' && !t.assignee,
     )
+    if (agents.length === 0) {
+      const constrained = unassigned.find((task) =>
+        hasExplicitTaskRequirements(task.requires))
+      if (constrained) this.eligibleAgents(constrained, agents)
+      return new Map()
+    }
 
     switch (this.strategy) {
       case 'round-robin':
@@ -219,7 +225,13 @@ export class Scheduler {
     agents: AgentConfig[],
     allTasks: Task[],
   ): string | undefined {
-    if (agents.length === 0 || task.status !== 'pending' || task.assignee) {
+    if (task.status !== 'pending' || task.assignee) {
+      return undefined
+    }
+    if (agents.length === 0) {
+      if (hasExplicitTaskRequirements(task.requires)) {
+        this.eligibleAgents(task, agents)
+      }
       return undefined
     }
 
@@ -296,9 +308,10 @@ export class Scheduler {
   ): Map<string, string> {
     const result = new Map<string, string>()
     for (const task of unassigned) {
-      const agent = agents[this.roundRobinCursor % agents.length]!
+      const eligible = this.eligibleAgents(task, agents)
+      const agent = eligible[this.roundRobinCursor % eligible.length]!
       result.set(task.id, agent.name)
-      this.roundRobinCursor = (this.roundRobinCursor + 1) % agents.length
+      this.roundRobinCursor = (this.roundRobinCursor + 1) % eligible.length
     }
     return result
   }
@@ -326,12 +339,13 @@ export class Scheduler {
 
     const result = new Map<string, string>()
     for (const task of unassigned) {
+      const eligible = this.eligibleAgents(task, agents)
       // Pick the agent with the lowest current load.
-      let bestAgent = agents[0]!
+      let bestAgent = eligible[0]!
       let bestLoad = load.get(bestAgent.name) ?? 0
 
-      for (let i = 1; i < agents.length; i++) {
-        const agent = agents[i]!
+      for (let i = 1; i < eligible.length; i++) {
+        const agent = eligible[i]!
         const agentLoad = load.get(agent.name) ?? 0
         if (agentLoad < bestLoad) {
           bestLoad = agentLoad
@@ -365,16 +379,14 @@ export class Scheduler {
     const selector = new AgentSelector()
 
     for (const task of unassigned) {
-      const selection = selector.select({
-        title: task.title,
-        description: task.description,
-        requires: task.requires,
-      }, agents, this.selectorContext)
+      const selection = this.selectTaskAgents(task, agents, selector)
       if (selection.error) {
         throw new Error(
           `Scheduler capability-match: ${selection.error.code}: ${selection.error.reasons.join(' ')}`,
         )
       }
+      const eligibleAgents = agents.filter((agent) =>
+        selection.eligible.some((entry) => entry.agent === agent))
 
       // Preserve the legacy scheduler's roster-order tie-break while reusing
       // the selector's eligibility and scoring kernel. The public selector and
@@ -390,8 +402,8 @@ export class Scheduler {
       }
 
       if (bestScore === 0) {
-        bestAgent = agents[this.roundRobinCursor % agents.length]!
-        this.roundRobinCursor = (this.roundRobinCursor + 1) % agents.length
+        bestAgent = eligibleAgents[this.roundRobinCursor % eligibleAgents.length]!
+        this.roundRobinCursor = (this.roundRobinCursor + 1) % eligibleAgents.length
       }
 
       result.set(task.id, bestAgent.name)
@@ -425,9 +437,10 @@ export class Scheduler {
     let cursor = this.roundRobinCursor
 
     for (const task of ranked) {
-      const agent = agents[cursor % agents.length]!
+      const eligible = this.eligibleAgents(task, agents)
+      const agent = eligible[cursor % eligible.length]!
       result.set(task.id, agent.name)
-      cursor = (cursor + 1) % agents.length
+      cursor = (cursor + 1) % eligible.length
     }
 
     // Advance the shared cursor for consistency with round-robin.
@@ -444,10 +457,8 @@ export class Scheduler {
    * Assignments made earlier in this call are deliberately not folded into
    * load, keeping the decision compatible with future one-ready-task calls.
    *
-   * When hard filtering leaves no eligible agent, the selector's structured
-   * failure is emitted as a warning and the task follows an explicit zero-fit
-   * fallback across the full roster, using current load and ascending agent
-   * name as the deterministic tie-break.
+   * Hard filtering is fail-closed. No load or fit fallback may reintroduce an
+   * ineligible agent.
    */
   private scheduleComposite(
     unassigned: Task[],
@@ -469,27 +480,12 @@ export class Scheduler {
     const result = new Map<string, string>()
 
     for (const task of ranked) {
-      const selection = selector.select({
-        title: task.title,
-        description: task.description,
-        requires: task.requires,
-      }, agents, this.selectorContext)
-      const candidates = selection.error
-        ? agents.map((agent) => ({ agent, score: 0 }))
-        : selection.eligible
-
+      const selection = this.selectTaskAgents(task, agents, selector)
       if (selection.error) {
-        this.options.onWarning?.({
-          code: selection.error.code,
-          message: selection.error.message,
-          taskId: task.id,
-          taskTitle: task.title,
-          reasons: selection.error.reasons,
-          fallback: 'zero-fit-current-load',
-        })
+        throw this.noEligibleAgentError(task, selection.error.reasons)
       }
 
-      const rankedCandidates = candidates.map((candidate) => {
+      const rankedCandidates = selection.eligible.map((candidate) => {
         const normalizedLoad = (loads.get(candidate.agent.name) ?? 0) / maxLoad
         return {
           agent: candidate.agent,
@@ -509,6 +505,55 @@ export class Scheduler {
     }
 
     return result
+  }
+
+  private eligibleAgents(task: Task, agents: AgentConfig[]): AgentConfig[] {
+    const selection = this.selectTaskAgents(task, agents)
+    if (selection.error) {
+      throw this.noEligibleAgentError(task, selection.error.reasons)
+    }
+    const eligible = new Set(selection.eligible.map((entry) => entry.agent))
+    return agents.filter((agent) => eligible.has(agent))
+  }
+
+  private selectTaskAgents(
+    task: Task,
+    agents: AgentConfig[],
+    selector = new AgentSelector(),
+  ): ReturnType<AgentSelector['select']> {
+    const effectiveAgents = agents.map((agent) =>
+      this.selectorContext.resolveCandidate?.(task, agent) ?? agent)
+    const originalByEffective = new Map(
+      effectiveAgents.map((effective, index) => [effective, agents[index]!] as const),
+    )
+    const selection = selector.select({
+      title: task.title,
+      description: task.description,
+      requires: task.requires,
+    }, effectiveAgents, this.selectorContext)
+    const remap = (agent: AgentConfig | undefined): AgentConfig | undefined =>
+      agent === undefined ? undefined : originalByEffective.get(agent)
+    return {
+      ...selection,
+      agent: remap(selection.agent),
+      eligible: selection.eligible.map((entry) => ({
+        ...entry,
+        agent: originalByEffective.get(entry.agent)!,
+      })),
+    }
+  }
+
+  private noEligibleAgentError(task: Task, reasons: readonly string[]): Error {
+    return Object.assign(
+      new Error(
+        `Scheduler ${this.strategy}: NO_ELIGIBLE_AGENT for task "${task.title}": ${reasons.join(' ')}`,
+      ),
+      {
+        code: 'NO_ELIGIBLE_AGENT',
+        taskId: task.id,
+        reasons,
+      },
+    )
   }
 
   private resolvedWeights(): SchedulingWeights {

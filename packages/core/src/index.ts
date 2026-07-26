@@ -96,7 +96,10 @@ export type {
   SchedulerOptions,
   SchedulerWarning,
 } from './orchestrator/scheduler.js'
-export { AgentSelector } from './orchestrator/agent-selector.js'
+export {
+  AgentSelector,
+  validateTaskRequirements,
+} from './orchestrator/agent-selector.js'
 export type {
   AgentSelectionFailure,
   AgentSelectionResult,
@@ -186,6 +189,7 @@ export {
   TokenBudgetExceededError,
   CostBudgetExceededError,
   InvalidMessageError,
+  InvalidTaskRequirementsError,
   LLMCallTimeoutError,
   RoutingDeclarationRequiredError,
   RoutingProfilerFailedError,
@@ -356,7 +360,16 @@ export type {
   TaskProfilerResult,
   RunTasksOptions,
   RunTaskSpec,
+  PlanPatchTaskSpec,
+  PlanPatchRetarget,
+  PlanPatch,
+  PlanRevision,
+  TaskVerificationOutcome,
+  TaskOutcome,
+  Replanner,
+  RecoveryOptions,
   TaskMetadata,
+  TaskRequirementIssue,
   TaskRequirements,
   RestoreOptions,
   ModelRouteConfig,
@@ -390,6 +403,8 @@ export type {
   CheckpointRunIdentity,
   CompletedTaskCheckpoint,
   TaskQueueSnapshot,
+  TaskQueueSnapshotV1,
+  TaskQueueSnapshotV2,
   TaskSnapshot,
 
   // Trace
