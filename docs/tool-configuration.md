@@ -306,7 +306,9 @@ Backend and provider checks use their structured configuration fields.
 
 Neither permissions nor capabilities are ever inferred from `systemPrompt` or
 other prose. When no candidate satisfies the hard requirements, the selector
-returns `NO_ELIGIBLE_AGENT`; a caller must choose any fallback explicitly.
+returns `NO_ELIGIBLE_AGENT`. Team and explicit-task execution validate the
+complete plan before dispatch and fail with `INVALID_TASK_REQUIREMENTS`; no
+scheduling strategy may fall back to an ineligible agent.
 
 ## Per-call gating with `onToolCall`
 

@@ -49,6 +49,7 @@ import type {
   ConsensusOptions,
   ConsensusResult,
   CoordinatorConfig,
+  ModelRoutingPolicy,
   PlanArtifact,
   PlanRevision,
   PlanTaskArtifact,
@@ -80,10 +81,18 @@ import { Team } from '../team/team.js'
 import { TaskQueue } from '../task/queue.js'
 import { Checkpoint } from '../memory/checkpoint.js'
 import { InMemoryStore } from '../memory/store.js'
-import { createTask, validateTaskDependencies } from '../task/task.js'
+import { validateTaskDependencies } from '../task/task.js'
 import { validateTaskMetadata } from '../task/metadata.js'
 import { Scheduler } from './scheduler.js'
-import { CostBudgetExceededError, TokenBudgetExceededError } from '../errors.js'
+import {
+  CostBudgetExceededError,
+  InvalidTaskRequirementsError,
+  TokenBudgetExceededError,
+} from '../errors.js'
+import {
+  validateTaskRequirements,
+  type AgentSelectorContext,
+} from './agent-selector.js'
 import {
   createRestoreIdentity,
   resolveRestoreMetadata,
@@ -165,12 +174,13 @@ import {
 } from '../eval/online.js'
 
 import {
-  parseTaskSpecs,
   buildCoordinatorBaseConfig,
+  buildCoordinatorTaskSpecsSchema,
   buildDecompositionPrompt,
   runCoordinatorSynthesis,
   loadSpecsIntoQueue,
   findInvalidAssignees,
+  type ParsedTaskSpec,
 } from './coordinator.js'
 
 // ---------------------------------------------------------------------------
@@ -249,7 +259,7 @@ export class OpenMultiAgent {
    *   - `maxDelegationDepth`: 3
    *   - `schedulingStrategy`: `'dependency-first'`
    *   - `schedulingWeights`: `{ fit: 0.7, load: 0.3 }`
-   *   - `strictAssignees`: `false`
+   *   - `strictAssignees`: `true`
    *   - `defaultModel`:   `'claude-opus-4-6'`
    *   - `defaultProvider`: `'anthropic'`
    */
@@ -281,7 +291,7 @@ export class OpenMultiAgent {
       maxDelegationDepth: config.maxDelegationDepth ?? DEFAULT_MAX_DELEGATION_DEPTH,
       schedulingStrategy: config.schedulingStrategy ?? 'dependency-first',
       schedulingWeights: config.schedulingWeights ?? {},
-      strictAssignees: config.strictAssignees ?? false,
+      strictAssignees: config.strictAssignees ?? true,
       executionRouter: config.executionRouter ?? new DeterministicRouter(),
       defaultModel: config.defaultModel ?? DEFAULT_MODEL,
       defaultProvider: config.defaultProvider ?? 'anthropic',
@@ -310,14 +320,13 @@ export class OpenMultiAgent {
     }
   }
 
-  private createScheduler(): Scheduler {
+  private createScheduler(
+    modelRouting?: ModelRoutingPolicy,
+    tasks: () => readonly Task[] = () => [],
+  ): Scheduler {
     return new Scheduler(
       this.config.schedulingStrategy,
-      {
-        defaultProvider: this.config.defaultProvider,
-        defaultToolPreset: this.config.defaultToolPreset,
-        includeDelegateTool: true,
-      },
+      this.agentSelectorContext(modelRouting, tasks),
       {
         weights: this.config.schedulingWeights,
         onWarning: (warning) => {
@@ -329,6 +338,31 @@ export class OpenMultiAgent {
         },
       },
     )
+  }
+
+  private agentSelectorContext(
+    modelRouting?: ModelRoutingPolicy,
+    tasks: () => readonly Task[] = () => [],
+  ): AgentSelectorContext {
+    return {
+      defaultProvider: this.config.defaultProvider,
+      defaultToolPreset: this.config.defaultToolPreset,
+      includeDelegateTool: true,
+      ...(modelRouting ? {
+        resolveCandidate: (task: Task, candidate: AgentConfig): AgentConfig => {
+          const base = applyDefaultToolPreset(
+            applyAgentDefaults(candidate, this.config),
+            this.config.defaultToolPreset,
+          )
+          return withModelRoute(base, routeMatches(modelRouting, {
+            phase: 'worker',
+            agent: candidate.name,
+            task,
+            leaf: isLeafTask(task, tasks()),
+          }))
+        },
+      } : {}),
+    }
   }
 
   private beginOnlineEvaluation(input: unknown): PendingOnlineEvaluation | undefined {
@@ -863,7 +897,10 @@ export class OpenMultiAgent {
     )
 
     const decompositionPrompt = buildDecompositionPrompt(goal, agentConfigs)
-    const coordinatorAgent = buildAgent(coordinatorConfig)
+    const coordinatorAgent = buildAgent({
+      ...coordinatorConfig,
+      outputSchema: buildCoordinatorTaskSpecsSchema(agentConfigs, this.config.strictAssignees),
+    })
     const runId = identity.runId
     const coordinatorDecomposeSpanId = this.config.onTrace ? generateSpanId() : undefined
 
@@ -923,10 +960,35 @@ export class OpenMultiAgent {
     // ------------------------------------------------------------------
     // Step 2: Parse tasks from coordinator output
     // ------------------------------------------------------------------
-    const taskSpecs = parseTaskSpecs(decompositionResult.output)
+    if (!decompositionResult.success && decompositionResult.errorInfo?.kind !== 'validation') {
+      this.config.onProgress?.({
+        type: 'agent_complete',
+        agent: 'coordinator',
+        data: decompositionResult,
+      })
+      this.config.onProgress?.({
+        type: 'error',
+        data: {
+          code: 'COORDINATOR_DECOMPOSITION_FAILED',
+          error: decompositionResult.errorInfo,
+        },
+      })
+      return finish(this.buildTeamRunResult(
+        agentResults,
+        identity,
+        goal,
+        [],
+        decompositionResult.status ?? statusOnly('error'),
+        decompositionResult.errorInfo,
+      ))
+    }
+
+    const taskSpecs = decompositionResult.success && Array.isArray(decompositionResult.structured)
+      ? decompositionResult.structured as ParsedTaskSpec[]
+      : null
 
     const queue = new TaskQueue()
-    const scheduler = this.createScheduler()
+    const scheduler = this.createScheduler(options?.modelRouting, () => queue.list())
     const taskMetrics = new Map<string, TaskExecutionMetrics>()
 
     if (taskSpecs && taskSpecs.length > 0) {
@@ -1004,16 +1066,59 @@ export class OpenMultiAgent {
         ))
       }
     } else {
-      // Coordinator failed to produce structured output — fall back to
-      // one task per agent using the goal as the description.
-      for (const agentConfig of agentConfigs) {
-        const task = createTask({
-          title: `${agentConfig.name}: ${goal.slice(0, 80)}`,
-          description: goal,
-          assignee: agentConfig.name,
-        })
-        queue.add(task)
-      }
+      // A coordinator plan is an execution boundary. Do not turn an invalid
+      // plan into a different topology: that could duplicate side effects.
+      const error = Object.assign(
+        new Error('Coordinator plan failed structured validation after repair.'),
+        { code: 'COORDINATOR_PLAN_INVALID' },
+      )
+      const classified = classifyRunFailure(error, { kind: 'validation' })
+      this.config.onProgress?.({
+        type: 'agent_complete',
+        agent: 'coordinator',
+        data: decompositionResult,
+      })
+      this.config.onProgress?.({
+        type: 'error',
+        data: {
+          code: 'COORDINATOR_PLAN_INVALID',
+          error: classified.errorInfo,
+        },
+      })
+      return finish(this.buildTeamRunResult(
+        agentResults,
+        identity,
+        goal,
+        [],
+        classified.status,
+        classified.errorInfo,
+      ))
+    }
+
+    const requirementIssues = validateTaskRequirements(
+      queue.list(),
+      agentConfigs,
+      this.agentSelectorContext(options?.modelRouting, () => queue.list()),
+    )
+    if (requirementIssues.length > 0) {
+      const error = new InvalidTaskRequirementsError(requirementIssues)
+      const classified = classifyRunFailure(error, { kind: 'validation' })
+      this.config.onProgress?.({
+        type: 'error',
+        data: {
+          code: error.code,
+          issues: requirementIssues,
+          error: classified.errorInfo,
+        },
+      })
+      return finish(this.buildTeamRunResult(
+        agentResults,
+        identity,
+        goal,
+        [],
+        classified.status,
+        classified.errorInfo,
+      ))
     }
 
     // ------------------------------------------------------------------
@@ -1393,6 +1498,7 @@ export class OpenMultiAgent {
             role: t.role,
             priority: t.priority,
             metadata: t.metadata,
+            requires: t.requires,
             verify: t.verify,
           })),
           team.getAgents(),
@@ -1847,6 +1953,25 @@ export class OpenMultiAgent {
     governanceDeclaration?: GovernanceDeclaration,
     routingDecisionInput?: RoutingDecisionRecordInput,
   ): Promise<TeamRunResult> {
+    const agentConfigs = team.getAgents()
+    const requirementIssues = validateTaskRequirements(
+      queue.list(),
+      agentConfigs,
+      this.agentSelectorContext(options?.modelRouting, () => queue.list()),
+    )
+    if (requirementIssues.length > 0) {
+      const error = new InvalidTaskRequirementsError(requirementIssues)
+      this.config.onProgress?.({
+        type: 'error',
+        data: {
+          code: error.code,
+          issues: requirementIssues,
+          error: classifyRunFailure(error, { kind: 'validation' }).errorInfo,
+        },
+      })
+      throw error
+    }
+
     const newRunFacts = identity === undefined
       ? createRunFacts(identityOptionsForRun(options))
       : undefined
@@ -1856,8 +1981,7 @@ export class OpenMultiAgent {
     const routingDecision = routingDecisionInput
       ? recordRoutingDecision(runIdentity, traceRuntime, routingDecisionInput)
       : undefined
-    const agentConfigs = team.getAgents()
-    const scheduler = this.createScheduler()
+    const scheduler = this.createScheduler(options?.modelRouting, () => queue.list())
     if (this.config.onApproval) {
       scheduler.autoAssign(queue, agentConfigs)
     }

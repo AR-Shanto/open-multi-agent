@@ -97,11 +97,12 @@ enters results, task trace attributes, checkpoint snapshots, or plan artifacts.
 
 ## Assignment strategies
 
-Unassigned tasks are scheduled when they become ready. `dependency-first` and
-`composite` order the current ready set by downstream criticality; each selected
-task is then assigned individually. `round-robin` retains its cursor,
-`least-busy` reads current `in_progress` load, and `capability-match` retains its
-hard eligibility filter.
+Before any task is dispatched, the complete plan is validated against explicit
+task requirements. Every scheduling strategy filters to eligible agents first;
+the configured strategy only ranks or rotates within that eligible set.
+`dependency-first` and `composite` order the current ready set by downstream
+criticality, `round-robin` retains its cursor, and `least-busy` reads current
+`in_progress` load.
 
 Agents may declare `description`, `capabilities`, `costTier`, and
 `latencyClass`; none is inferred when omitted. Explicit `runTasks()` specs and
@@ -109,14 +110,14 @@ coordinator-generated tasks may add `requires` with `requiredTools`,
 `requiredCapabilities`, `requiredBackend`, and `requiredProvider`. Tool
 requirements are checked against the final resolved grant set, after presets,
 allowlists, denylists, and framework rails.
+Provider requirements are also checked after worker model routing. Incompatible
+fallback routes are removed rather than crossing the declared provider boundary.
 
-`capability-match` and `composite` deliberately differ when a task's `requires`
-cannot be satisfied:
-
-| Strategy | No eligible agent |
-|---|---|
-| `capability-match` | Terminates scheduling with `NO_ELIGIBLE_AGENT`. |
-| `composite` | Emits a structured `NO_ELIGIBLE_AGENT` warning, then falls back to zero fit plus current load. |
+When no roster candidate satisfies an unassigned task, validation fails with
+`INVALID_TASK_REQUIREMENTS` and an issue code of `NO_ELIGIBLE_AGENT`. When an
+explicit assignee exists but does not satisfy the requirements, the issue code
+is `ASSIGNEE_REQUIREMENTS_MISMATCH`. Both cases fail before worker execution;
+hard requirements never fall back to an ineligible agent.
 
 `composite` maximizes `fitWeight * fit + loadWeight * (1 - normalizedCurrentLoad)`.
 `schedulingWeights.fit` and `schedulingWeights.load` default to `0.7` and `0.3`,
@@ -126,10 +127,10 @@ state. Assignments earlier in one scheduler call are not folded into that same
 call; in event-driven execution the next ready-task call can observe tasks
 already marked `in_progress`.
 
-Coordinator plans that name an agent outside the roster emit an
-`INVALID_ASSIGNEE` warning, clear that assignment, and use the configured
-scheduler by default. Set `strictAssignees: true` to stop before task execution
-with a structured validation error instead.
+Coordinator plans that name an agent outside the roster fail validation before
+task execution by default. Set `strictAssignees: false` only to retain the
+legacy behavior of emitting an `INVALID_ASSIGNEE` warning, clearing that
+assignment, and using the configured scheduler.
 
 ## Approval modes
 
