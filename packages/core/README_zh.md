@@ -145,17 +145,18 @@ const orchestrator = new OpenMultiAgent({
 
 | 策略 | 分配行为 | 适用场景 |
 |------|----------|----------|
-| `dependency-first`（默认） | 优先分配能解锁最多下游工作的任务，并轮转选择 Agent | 任务图存在明确依赖关系 |
-| `round-robin` | 按队列顺序在 Agent roster 中轮转分配 | Agent 能力可以互换 |
-| `least-busy` | 选择当前活跃任务或本批新分配任务最少的 Agent | 任务耗时差异较大，需要负载均衡 |
+| `dependency-first`（默认） | 优先分配能解锁最多下游工作的任务，并在合格 Agent 中轮转选择 | 任务图存在明确依赖关系 |
+| `round-robin` | 按队列顺序在合格 Agent 中轮转分配 | Agent 能力可以互换 |
+| `least-busy` | 选择当前活跃任务或本批新分配任务最少的合格 Agent | 任务耗时差异较大，需要负载均衡 |
 | `capability-match` | 先过滤显式任务要求，再优先匹配声明的能力标签，最后使用兼容的关键词亲和度 | 任务或 Agent 声明了有区分度的要求/能力 |
-| `composite` | 按阻塞的下游任务数排列任务，经 `AgentSelector` 硬过滤后，最大化 `fitWeight * fit + loadWeight * (1 - normalizedCurrentLoad)` | 需要在一次决策中同时考虑关键度、能力匹配与当前负载 |
+| `composite` | 按阻塞的下游任务数排列任务，再在合格 Agent 中综合选择匹配度与可用容量最优者 | 需要在一次决策中同时考虑关键度、能力匹配与当前负载 |
 
 Agent 可声明 `description`、`capabilities`、`costTier` 与 `latencyClass`，
-任务可通过 `requires` 声明硬性过滤条件；设置 `strictAssignees: true` 可在
-coordinator 计划引用 roster 之外的 Agent 时提前失败。权重语义、负载归一化、
-`NO_ELIGIBLE_AGENT` 与 `INVALID_ASSIGNEE` 行为、审批兼容与 progress 事件迁移
-见[任务调度与派发](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/task-scheduling.md)。
+任务可通过 `requires` 声明硬约束。任何调度策略无法满足这些约束时，都会在
+worker 执行前失败；设置 `strictAssignees: true` 可在 coordinator 计划引用
+roster 之外的 Agent 时提前失败。权重语义、负载归一化、`NO_ELIGIBLE_AGENT`
+与 `INVALID_ASSIGNEE` 行为、审批兼容与 progress 事件迁移见
+[任务调度与派发](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/task-scheduling.md)。
 
 ## 核心能力
 
