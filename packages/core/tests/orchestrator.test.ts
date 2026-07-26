@@ -327,6 +327,18 @@ describe('OpenMultiAgent', () => {
       expect(result.success).toBe(true)
     })
 
+    it('rejects cyclic task dependencies before dispatch', async () => {
+      const oma = new OpenMultiAgent({ defaultModel: 'mock-model' })
+      const team = oma.createTeam('t', teamCfg())
+
+      await expect(oma.runTasks(team, [
+        { title: 'Task A', description: 'Do A', assignee: 'worker-a', dependsOn: ['Task B'] },
+        { title: 'Task B', description: 'Do B', assignee: 'worker-b', dependsOn: ['Task A'] },
+      ])).rejects.toThrow('Invalid task dependencies: Cyclic dependency detected')
+
+      expect(capturedPrompts).toEqual([])
+    })
+
     it.each<{
       strategy: SchedulingStrategy
       expected: Record<string, string>
@@ -957,6 +969,33 @@ describe('OpenMultiAgent', () => {
       expect(result.success).toBe(true)
       // Should have coordinator result
       expect(result.agentResults.has('coordinator')).toBe(true)
+    })
+
+    it('returns a validation failure for a coordinator-generated cyclic DAG', async () => {
+      mockAdapterResponses = [
+        '```json\n[{"title":"Task A","description":"Do A","assignee":"worker-a","dependsOn":["Task B"]},{"title":"Task B","description":"Do B","assignee":"worker-b","dependsOn":["Task A"]}]\n```',
+      ]
+      const events: OrchestratorEvent[] = []
+      const oma = new OpenMultiAgent({
+        defaultModel: 'mock-model',
+        onProgress: (event) => events.push(event),
+      })
+      const team = oma.createTeam('t', teamCfg())
+
+      const result = await oma.runTeam(
+        team,
+        'First research the topic, then produce a detailed report with recommendations.',
+      )
+
+      expect(result.success).toBe(false)
+      expect(result.status?.code).toBe('error')
+      expect(result.errorInfo).toMatchObject({ kind: 'validation' })
+      expect(result.tasks).toEqual([])
+      expect(capturedPrompts).toHaveLength(1)
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'error',
+        data: expect.objectContaining({ code: 'INVALID_TASK_DEPENDENCIES' }),
+      }))
     })
 
     it('falls back to one-task-per-agent when coordinator output is unparseable', async () => {
