@@ -591,18 +591,22 @@ the gate control the step status:
 The frozen `run-team-routing-stability@1.0.0` EvalSet in
 `packages/core/tests/fixtures/eval/routing-stability-set.json` measures whether
 equivalent `runTeam()` goals keep the same executed topology when prompt length
-or language changes. Each family contains a short English variant, a detailed
-English variant longer than the current simple-goal boundary, and a Chinese
-translation. Governance families carry the same `governanceIntent: 'required'`,
+or language changes. Each family contains short and detailed English variants
+plus Chinese, Japanese, and Korean translations. Governance families carry the
+same `governanceIntent: 'required'`,
 `requiredRoles`, and `requiredOrder` declaration on every variant; benign
 families carry no declaration.
 
 The test injects one deterministic `LLMAdapter` into every worker and the
 coordinator. Every model call returns the same fixed text, including a valid
-two-role coordinator plan, so it makes no network request and needs no API key.
-Within one family, the goal text is therefore the only routing input that
-changes. The measured topology comes from `buildExecutionReceipt(result)` and
-the `result.tasks` short-circuit marker, and contains only:
+two-role coordinator plan. It also injects a valid low-risk `TaskProfiler`
+fixture for benign Single candidates and fails the test unless Hybrid profiling
+finishes with `outcome: 'applied'`; the gate therefore cannot pass by silently
+falling back from invalid profile output. The suite makes no network request
+and needs no API key. Within one family, the goal text is therefore the only
+routing input that changes. The measured topology comes from
+`buildExecutionReceipt(result)` and the `result.tasks` short-circuit marker, and
+contains only:
 
 - `single-short-circuit` versus task graph;
 - the worker roles that actually executed; and
@@ -615,35 +619,63 @@ Length invariance compares the fixture's short/detailed English pair; language
 invariance compares its explicitly paired English/Chinese variants.
 
 `packages/core/tests/fixtures/eval/routing-stability-gate.json` applies three
-absolute thresholds only to the `governance` tag: routing-stability minimum
-`1` (zero flips), length-invariance minimum `1`, and language-invariance minimum
-`1`. Scorer and target error limits are both zero. The Vitest suite emits one
-full report, then evaluates the gate on a `governance`-filtered run; benign
-scores, scorer health, and target health therefore cannot affect the verdict.
-The existing CI `npm test` matrix blocks a change that makes a declared route
-depend on goal language or length. A negative-control test injects a fake
-declared router that collapses Chinese variants to one role and asserts that
-both the routing-stability and language-invariance thresholds fail.
+absolute thresholds to the `governance` tag: routing-stability minimum `1`
+(zero flips), length-invariance minimum `1`, and language-invariance minimum
+`1`. It also gates benign routing-stability at `0.95` (at most 5% pair flips);
+benign length/language submetrics remain monitored. Scorer and target error
+limits are both zero. The existing CI `npm test` matrix blocks a change that
+makes a declared route depend on goal language or length or pushes benign
+topology flips over the limit. A negative-control test injects a fake declared
+router that collapses Chinese variants to one role and asserts that both the
+routing-stability and language-invariance thresholds fail.
 
-Benign automatic routing remains monitored, not gated. The introduction
-snapshot below is emitted in the test's `[routing-stability]` EvalSet report:
+The current snapshot below is emitted in the test's `[routing-stability]`
+EvalSet report:
 
 | Family | Pair flips | Flip rate | Length invariant | Language invariant |
 |---|---:|---:|---:|---:|
-| Declared wire transfer | 0 / 3 | 0% | 100% | 100% |
-| Declared key rotation | 0 / 3 | 0% | 100% | 100% |
-| **Declared governance total** | **0 / 6** | **0%** | **100%** | **100%** |
-| Undeclared DNS | 2 / 3 | 66.7% | 0% | 0% |
-| Undeclared database comparison | 2 / 3 | 66.7% | 0% | 100% |
-| **Undeclared benign total** | **4 / 6** | **66.7%** | **0%** | **50%** |
+| Declared wire transfer | 0 / 10 | 0% | 100% | 100% |
+| Declared key rotation | 0 / 10 | 0% | 100% | 100% |
+| **Declared governance total** | **0 / 20** | **0%** | **100%** | **100%** |
+| Undeclared DNS | 0 / 10 | 0% | 100% | 100% |
+| Undeclared database comparison | 0 / 10 | 0% | 100% | 100% |
+| **Undeclared benign total** | **0 / 20** | **0%** | **100%** | **100%** |
 
 The target for undeclared benign routing is at most 5% pair flips and at most
-5% length mismatches (at least 95% length invariance). The current snapshot is
-well outside that target and is intentionally non-blocking: automatic routing
-language/length neutrality is a known unresolved item, and changing its routing
-or classification behavior is outside this EvalSet's scope. Update the frozen
-corpus version and the documented snapshot only after reviewing an intentional
+5% length mismatches (at least 95% length invariance). Update the frozen corpus
+version and the documented snapshot only after reviewing an intentional
 measurement change.
+
+## Semantic routing policy EvalSet
+
+`packages/core/tests/fixtures/eval/semantic-routing-set.json` freezes the V1
+Hybrid policy contract independently from provider behavior. It covers short
+independent-evidence and independent-review goals, permission isolation,
+consequential side effects, conflicting objectives, ordinary short and long
+single-task negatives, equivalent Chinese/Japanese/Korean goals, and a
+prompt-injection sample.
+
+Each fixture contains a reviewed `TaskProfile`, framework-computed facts, and
+the expected deterministic recommendation. CI validates the strict profile
+schema and requires every fixture to match exactly. This proves Policy behavior
+without treating one provider's current classification as the semantic
+contract. Real-provider E2E is limited to checking that the one-call Profiler
+integration can produce a valid profile; it is not the sole routing oracle.
+
+Shadow evaluation belongs in CI and canary release work, not the public runtime
+default. Before promoting a major release, measure the reviewed end-to-end
+corpus against these gates:
+
+- zero false-Single results on critical cases;
+- at least 95% reviewed routing accuracy;
+- at most 1% invalid/failed Profiler outputs;
+- median Profiler token overhead no greater than 5% of representative total
+  usage; and
+- P95 end-to-end latency regression no greater than 10%.
+
+Historical success rates, online adaptive learning, and Team-to-Single
+optimization require separately versioned evaluation, monitoring, and rollback
+and are not part of V1.
 
 ## Memory evaluation metrics
 

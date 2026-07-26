@@ -20,7 +20,7 @@ import {
 const STATUS_CODES = new Set<RunStatusCode>([
   'ok', 'error', 'cancelled', 'timeout', 'budget_exhausted', 'rejected', 'skipped',
 ])
-const SPAN_KINDS = new Set(['run', 'agent', 'task', 'llm', 'tool', 'plan', 'consensus', 'checkpoint', 'callback'])
+const SPAN_KINDS = new Set(['run', 'routing', 'agent', 'task', 'llm', 'tool', 'plan', 'consensus', 'checkpoint', 'callback'])
 const EVENT_NAMES = new Set([
   'retry_scheduled', 'budget_exhausted', 'first_chunk', 'approval_decision',
   'checkpoint_failed', 'telemetry_diagnostic', 'loop_detected', 'stream_chunk',

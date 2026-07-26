@@ -9,11 +9,15 @@
 import type {
   AgentConfig,
   ExecutionRouter,
+  RoutingFailurePolicy,
   RoutingContext,
   RoutingDecision,
+  RoutingFallbackCode,
   RosterSummaryEntry,
 } from '../types.js'
 import { isSimpleGoal } from './short-circuit.js'
+import { RoutingTimeoutError } from '../errors.js'
+import { mergeAbortSignals } from '../utils/abort.js'
 
 export type {
   ExecutionRouter,
@@ -22,13 +26,21 @@ export type {
   RoutingBudget,
   RoutingContext,
   RoutingDecision,
+  RoutingDecisionStatus,
+  RoutingFallbackCode,
   RosterSummaryEntry,
 } from '../types.js'
 
 export const DETERMINISTIC_ROUTER_VERSION = 'deterministic-v1'
 
 class RoutingValidationError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly fallbackCode: Extract<
+      RoutingFallbackCode,
+      'invalid-router-version' | 'invalid-decision'
+    >,
+  ) {
     super(message)
     this.name = 'RoutingValidationError'
   }
@@ -71,6 +83,7 @@ export function buildRoutingContext(
     readonly maxTokenBudget?: number
     readonly maxCostBudget?: number
   },
+  abortSignal?: AbortSignal,
 ): RoutingContext {
   const roster: RosterSummaryEntry[] = agents.map((agent) => {
     const toolCount = directToolCount(agent)
@@ -82,6 +95,7 @@ export function buildRoutingContext(
         ? { capabilities: [...agent.capabilities] }
         : {}),
       ...(agent.costTier !== undefined ? { costTier: agent.costTier } : {}),
+      ...(agent.latencyClass !== undefined ? { latencyClass: agent.latencyClass } : {}),
     }
   })
   const hasBudget = budget.maxTokenBudget !== undefined || budget.maxCostBudget !== undefined
@@ -100,7 +114,37 @@ export function buildRoutingContext(
           },
         }
       : {}),
+    ...(abortSignal !== undefined ? { abortSignal } : {}),
   }
+}
+
+function fallbackCode(error: unknown): RoutingFallbackCode {
+  if (error instanceof RoutingValidationError) return error.fallbackCode
+  if (error instanceof RoutingTimeoutError) return 'router-timeout'
+  return 'router-error'
+}
+
+async function decideWithTimeout(
+  router: ExecutionRouter,
+  context: RoutingContext,
+  timeoutMs: number | undefined,
+): Promise<RoutingDecision> {
+  if (timeoutMs === undefined || timeoutMs <= 0) return router.decide(context)
+  const timeoutSignal = AbortSignal.timeout(timeoutMs)
+  const abortSignal = context.abortSignal
+    ? mergeAbortSignals(context.abortSignal, timeoutSignal)
+    : timeoutSignal
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutSignal.addEventListener(
+      'abort',
+      () => reject(new RoutingTimeoutError(timeoutMs, 'router')),
+      { once: true },
+    )
+  })
+  return Promise.race([
+    Promise.resolve(router.decide({ ...context, abortSignal })),
+    timeout,
+  ])
 }
 
 function isValidDecision(
@@ -143,20 +187,37 @@ export async function resolveExecutionRouting(
   router: ExecutionRouter,
   context: RoutingContext,
   fallback: DeterministicRouter,
+  options: {
+    readonly timeoutMs?: number
+    readonly failurePolicy?: RoutingFailurePolicy
+  } = {},
 ): Promise<RoutingDecision> {
   try {
     if (typeof router.version !== 'string' || router.version.length === 0) {
-      throw new RoutingValidationError('router version must be a non-empty string.')
+      throw new RoutingValidationError(
+        'router version must be a non-empty string.',
+        'invalid-router-version',
+      )
     }
-    const decision = await router.decide(context)
+    const decision = await decideWithTimeout(router, context, options.timeoutMs)
     if (!isValidDecision(decision, router.version, context)) {
-      throw new RoutingValidationError('router returned an invalid decision.')
+      throw new RoutingValidationError(
+        'router returned an invalid decision.',
+        'invalid-decision',
+      )
     }
-    return decision
+    return { ...decision, status: 'selected' }
   } catch (error) {
+    if (context.abortSignal?.aborted) throw error
+    if (options.failurePolicy === 'fail') throw error
     const decision = fallback.decide(context)
     return {
       ...decision,
+      status: 'fallback',
+      ...(typeof router.version === 'string' && router.version.length > 0
+        ? { requestedRouterVersion: router.version }
+        : {}),
+      fallbackCode: fallbackCode(error),
       reasons: [...decision.reasons, fallbackReason(error)],
     }
   }

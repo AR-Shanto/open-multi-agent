@@ -2,7 +2,7 @@
  * @fileoverview Framework-specific error classes.
  */
 
-import type { TaskRequirementIssue } from './types.js'
+import type { SemanticRoutingAssessment, TaskRequirementIssue } from './types.js'
 
 /**
  * Raised before task execution when a task has no eligible agent or its
@@ -80,6 +80,51 @@ export class LLMCallTimeoutError extends Error {
   }
 }
 
+/** Raised when routing infrastructure exceeds its configured deadline. */
+export class RoutingTimeoutError extends Error {
+  readonly code = 'ROUTING_TIMEOUT'
+
+  constructor(
+    readonly timeoutMs: number,
+    readonly stage: 'router' | 'profiler',
+  ) {
+    super(`Execution routing ${stage} exceeded its timeout of ${timeoutMs}ms`)
+    this.name = 'RoutingTimeoutError'
+  }
+}
+
+/** Raised when the semantic profiler cannot produce a valid task profile. */
+export class RoutingProfilerFailedError extends Error {
+  readonly code = 'ROUTING_PROFILER_FAILED'
+
+  constructor(
+    message: string,
+    readonly cause?: unknown,
+  ) {
+    super(message, cause !== undefined ? { cause } : undefined)
+    this.name = 'RoutingProfilerFailedError'
+  }
+}
+
+/**
+ * Raised before execution when inferred high-risk semantics need an explicit
+ * governance topology rather than an automatic model-selected route.
+ */
+export class RoutingDeclarationRequiredError extends Error {
+  readonly code = 'ROUTING_DECLARATION_REQUIRED'
+
+  constructor(
+    readonly reasons: readonly string[],
+    readonly assessment?: SemanticRoutingAssessment,
+  ) {
+    super(
+      'Hybrid execution routing requires an explicit governance declaration: '
+      + reasons.join('; '),
+    )
+    this.name = 'RoutingDeclarationRequiredError'
+  }
+}
+
 /**
  * Raised when a message list passed to an adapter violates the
  * {@link LLMMessage}[] contract (e.g. a `content` that isn't a `ContentBlock[]`).
@@ -126,6 +171,9 @@ export function isRetryableError(error: unknown): boolean {
   if (error instanceof CostBudgetExceededError) return false
   if (error instanceof InvalidMessageError) return false
   if (error instanceof LLMCallTimeoutError) return true
+  if (error instanceof RoutingTimeoutError) return true
+  if (error instanceof RoutingProfilerFailedError) return false
+  if (error instanceof RoutingDeclarationRequiredError) return false
   if (error instanceof Error && error.name === 'AbortError') return false
   const status = extractStatus(error)
   if (status === undefined) return true

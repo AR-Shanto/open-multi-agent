@@ -73,7 +73,11 @@ async function runAutomaticTeam(
   agentConfig: AgentConfig,
   goal = 'Rotate the password security secret.',
 ) {
-  const orchestrator = new OpenMultiAgent({ defaultModel: 'mock-model', ...config })
+  const orchestrator = new OpenMultiAgent({
+    defaultModel: 'mock-model',
+    executionRouting: { strategy: 'deterministic' },
+    ...config,
+  })
   const team = orchestrator.createTeam('consequential-test-team', {
     name: 'consequential-test-team',
     agents: [agentConfig],

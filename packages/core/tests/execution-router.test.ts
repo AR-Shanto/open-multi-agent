@@ -5,9 +5,13 @@ import {
   DeterministicRouter,
 } from '../src/orchestrator/execution-router.js'
 import { buildExecutionReceipt } from '../src/observability/execution-receipt.js'
+import { BatchingTraceSink } from '../src/observability/batching.js'
+import { InMemoryTraceStore } from '../src/observability/in-memory-store.js'
 import { TRACE_RECORD_OBSERVER } from '../src/observability/runtime.js'
+import { TraceStoreExporter } from '../src/observability/store-exporter.js'
 import type { TraceRecord } from '../src/observability/records.js'
 import { OpenMultiAgent } from '../src/orchestrator/orchestrator.js'
+import { RoutingTimeoutError } from '../src/errors.js'
 import type {
   AgentConfig,
   ExecutionRouter,
@@ -116,7 +120,9 @@ describe('DeterministicRouter', () => {
 
 describe('runTeam execution routing', () => {
   it('exposes the built-in decision on auto routes', async () => {
-    const result = await run('Say hello')
+    const result = await run('Say hello', {
+      executionRouting: { strategy: 'deterministic' },
+    })
 
     expect(result.routingDecision).toMatchObject({
       mode: 'single',
@@ -256,6 +262,7 @@ describe('runTeam execution routing', () => {
         },
       } satisfies ExecutionRouter,
       reason: 'custom decision failed',
+      fallbackCode: 'router-error',
     },
     {
       name: 'rejects',
@@ -264,6 +271,7 @@ describe('runTeam execution routing', () => {
         decide: async () => Promise.reject(new Error('router unavailable')),
       } satisfies ExecutionRouter,
       reason: 'custom decision failed',
+      fallbackCode: 'router-error',
     },
     {
       name: 'returns an unsupported mode',
@@ -276,16 +284,64 @@ describe('runTeam execution routing', () => {
         }),
       } as unknown as ExecutionRouter,
       reason: 'invalid decision',
+      fallbackCode: 'invalid-decision',
     },
-  ])('falls back to DeterministicRouter when a custom router $name', async ({ router, reason }) => {
+  ])('falls back to DeterministicRouter when a custom router $name', async ({
+    router,
+    reason,
+    fallbackCode,
+  }) => {
     const result = await run('Say hello', { executionRouter: router })
 
     expect(result.success).toBe(true)
     expect(result.routingDecision).toMatchObject({
       mode: 'single',
       routerVersion: DETERMINISTIC_ROUTER_VERSION,
+      status: 'fallback',
+      fallbackCode,
     })
     expect(result.routingDecision?.reasons.join(' ')).toContain(reason)
+  })
+
+  it('reports Router timeout and honors fallback/fail policies', async () => {
+    const stalled: ExecutionRouter = {
+      version: 'stalled-router-v1',
+      decide: () => new Promise(() => {}),
+    }
+    const fallback = await run('Say hello', {
+      executionRouter: stalled,
+      executionRouting: { timeoutMs: 1 },
+    })
+    expect(fallback.routingDecision).toMatchObject({
+      status: 'fallback',
+      requestedRouterVersion: 'stalled-router-v1',
+      fallbackCode: 'router-timeout',
+    })
+
+    const store = new InMemoryTraceStore()
+    const sink = new BatchingTraceSink(new TraceStoreExporter(store), {
+      diagnostics: 'silent',
+      scheduledDelayMs: 60_000,
+    })
+    await expect(run(
+      'Say hello',
+      {
+        runId: 'execution-router-fail',
+        executionRouter: stalled,
+        executionRouting: { timeoutMs: 1, failurePolicy: 'fail' },
+      },
+      undefined,
+      agents(),
+      { observability: { sinks: [sink] } },
+    )).rejects.toBeInstanceOf(RoutingTimeoutError)
+    await expect(sink.forceFlush({ timeoutMs: 500 })).resolves.toMatchObject({
+      status: 'ok',
+    })
+    await expect(store.getRun('execution-router-fail')).resolves.toMatchObject({
+      incomplete: false,
+      status: 'timeout',
+    })
+    await sink.shutdown({ timeoutMs: 500 })
   })
 
   it('bypasses routers and marks an explicit mode as an override', async () => {
