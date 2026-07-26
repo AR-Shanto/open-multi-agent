@@ -1130,6 +1130,15 @@ export interface TaskRequirements {
   readonly requiredProvider?: SupportedProvider
 }
 
+/** Structured reason why a task cannot satisfy its hard requirements. */
+export interface TaskRequirementIssue {
+  readonly code: 'NO_ELIGIBLE_AGENT' | 'ASSIGNEE_REQUIREMENTS_MISMATCH'
+  readonly taskId: string
+  readonly taskTitle: string
+  readonly assignee?: string
+  readonly reasons: readonly string[]
+}
+
 /** Bounded, trace-safe business references attached to one task. */
 export type TaskMetadata = Readonly<Record<string, TraceAttributeValue>>
 
@@ -1602,7 +1611,7 @@ export interface Task {
   readonly priority?: 'low' | 'normal' | 'high' | 'critical'
   /** Validated, bounded business references carried through result/trace/checkpoint. */
   readonly metadata?: TaskMetadata
-  /** Explicit hard requirements used by capability-aware scheduling. */
+  /** Explicit hard requirements enforced before assignment and execution. */
   readonly requires?: TaskRequirements
   result?: string
   readonly createdAt: Date
@@ -1658,15 +1667,16 @@ export interface OrchestratorConfig {
    *   agents are interchangeable.
    * - `'least-busy'` prefers the agent with the fewest active tasks; use it to
    *   balance work when task duration varies.
-   * - `'capability-match'` compares task text with agent names and system
-   *   prompts; use it when agents have distinct, clearly described roles.
+   * - `'capability-match'` ranks eligible agents using declared capabilities
+   *   and task affinity; use it when agents have distinct roles.
    * - `'dependency-first'` assigns tasks that unblock the most dependents
    *   first; use it for dependency-heavy DAGs.
    * - `'composite'` ranks by dependency criticality, hard-filters with the
    *   AgentSelector, then combines fit and current load.
    *
+   * All strategies hard-filter explicit task requirements before ranking.
    * Defaults to `'dependency-first'`. Explicit task assignees are preserved
-   * and are never replaced by this strategy.
+   * and must satisfy any declared requirements.
    */
   readonly schedulingStrategy?: SchedulingStrategy
   /**

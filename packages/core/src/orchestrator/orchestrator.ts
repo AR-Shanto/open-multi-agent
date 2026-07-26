@@ -49,6 +49,7 @@ import type {
   ConsensusOptions,
   ConsensusResult,
   CoordinatorConfig,
+  ModelRoutingPolicy,
   PlanArtifact,
   PlanTaskArtifact,
   OrchestratorConfig,
@@ -82,7 +83,15 @@ import { InMemoryStore } from '../memory/store.js'
 import { validateTaskDependencies } from '../task/task.js'
 import { validateTaskMetadata } from '../task/metadata.js'
 import { Scheduler } from './scheduler.js'
-import { CostBudgetExceededError, TokenBudgetExceededError } from '../errors.js'
+import {
+  CostBudgetExceededError,
+  InvalidTaskRequirementsError,
+  TokenBudgetExceededError,
+} from '../errors.js'
+import {
+  validateTaskRequirements,
+  type AgentSelectorContext,
+} from './agent-selector.js'
 import {
   createRestoreIdentity,
   resolveRestoreMetadata,
@@ -308,14 +317,13 @@ export class OpenMultiAgent {
     }
   }
 
-  private createScheduler(): Scheduler {
+  private createScheduler(
+    modelRouting?: ModelRoutingPolicy,
+    tasks: () => readonly Task[] = () => [],
+  ): Scheduler {
     return new Scheduler(
       this.config.schedulingStrategy,
-      {
-        defaultProvider: this.config.defaultProvider,
-        defaultToolPreset: this.config.defaultToolPreset,
-        includeDelegateTool: true,
-      },
+      this.agentSelectorContext(modelRouting, tasks),
       {
         weights: this.config.schedulingWeights,
         onWarning: (warning) => {
@@ -327,6 +335,31 @@ export class OpenMultiAgent {
         },
       },
     )
+  }
+
+  private agentSelectorContext(
+    modelRouting?: ModelRoutingPolicy,
+    tasks: () => readonly Task[] = () => [],
+  ): AgentSelectorContext {
+    return {
+      defaultProvider: this.config.defaultProvider,
+      defaultToolPreset: this.config.defaultToolPreset,
+      includeDelegateTool: true,
+      ...(modelRouting ? {
+        resolveCandidate: (task: Task, candidate: AgentConfig): AgentConfig => {
+          const base = applyDefaultToolPreset(
+            applyAgentDefaults(candidate, this.config),
+            this.config.defaultToolPreset,
+          )
+          return withModelRoute(base, routeMatches(modelRouting, {
+            phase: 'worker',
+            agent: candidate.name,
+            task,
+            leaf: isLeafTask(task, tasks()),
+          }))
+        },
+      } : {}),
+    }
   }
 
   private beginOnlineEvaluation(input: unknown): PendingOnlineEvaluation | undefined {
@@ -952,7 +985,7 @@ export class OpenMultiAgent {
       : null
 
     const queue = new TaskQueue()
-    const scheduler = this.createScheduler()
+    const scheduler = this.createScheduler(options?.modelRouting, () => queue.list())
     const taskMetrics = new Map<string, TaskExecutionMetrics>()
 
     if (taskSpecs && taskSpecs.length > 0) {
@@ -1046,6 +1079,32 @@ export class OpenMultiAgent {
         type: 'error',
         data: {
           code: 'COORDINATOR_PLAN_INVALID',
+          error: classified.errorInfo,
+        },
+      })
+      return finish(this.buildTeamRunResult(
+        agentResults,
+        identity,
+        goal,
+        [],
+        classified.status,
+        classified.errorInfo,
+      ))
+    }
+
+    const requirementIssues = validateTaskRequirements(
+      queue.list(),
+      agentConfigs,
+      this.agentSelectorContext(options?.modelRouting, () => queue.list()),
+    )
+    if (requirementIssues.length > 0) {
+      const error = new InvalidTaskRequirementsError(requirementIssues)
+      const classified = classifyRunFailure(error, { kind: 'validation' })
+      this.config.onProgress?.({
+        type: 'error',
+        data: {
+          code: error.code,
+          issues: requirementIssues,
           error: classified.errorInfo,
         },
       })
@@ -1409,6 +1468,7 @@ export class OpenMultiAgent {
             role: t.role,
             priority: t.priority,
             metadata: t.metadata,
+            requires: t.requires,
             verify: t.verify,
           })),
           team.getAgents(),
@@ -1853,6 +1913,25 @@ export class OpenMultiAgent {
     governanceDeclaration?: GovernanceDeclaration,
     routingDecisionInput?: RoutingDecisionRecordInput,
   ): Promise<TeamRunResult> {
+    const agentConfigs = team.getAgents()
+    const requirementIssues = validateTaskRequirements(
+      queue.list(),
+      agentConfigs,
+      this.agentSelectorContext(options?.modelRouting, () => queue.list()),
+    )
+    if (requirementIssues.length > 0) {
+      const error = new InvalidTaskRequirementsError(requirementIssues)
+      this.config.onProgress?.({
+        type: 'error',
+        data: {
+          code: error.code,
+          issues: requirementIssues,
+          error: classifyRunFailure(error, { kind: 'validation' }).errorInfo,
+        },
+      })
+      throw error
+    }
+
     const newRunFacts = identity === undefined
       ? createRunFacts(identityOptionsForRun(options))
       : undefined
@@ -1862,8 +1941,7 @@ export class OpenMultiAgent {
     const routingDecision = routingDecisionInput
       ? recordRoutingDecision(runIdentity, traceRuntime, routingDecisionInput)
       : undefined
-    const agentConfigs = team.getAgents()
-    const scheduler = this.createScheduler()
+    const scheduler = this.createScheduler(options?.modelRouting, () => queue.list())
     if (this.config.onApproval) {
       scheduler.autoAssign(queue, agentConfigs)
     }
