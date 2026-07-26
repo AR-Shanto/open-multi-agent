@@ -2,6 +2,25 @@
  * @fileoverview Framework-specific error classes.
  */
 
+import type { TaskRequirementIssue } from './types.js'
+
+/**
+ * Raised before task execution when a task has no eligible agent or its
+ * explicit assignee does not satisfy the task's hard requirements.
+ */
+export class InvalidTaskRequirementsError extends Error {
+  readonly code = 'INVALID_TASK_REQUIREMENTS'
+
+  constructor(readonly issues: readonly TaskRequirementIssue[]) {
+    super(
+      `Task requirements are unsatisfied: ${issues
+        .map((issue) => `${issue.code} for "${issue.taskTitle}"`)
+        .join(', ')}.`,
+    )
+    this.name = 'InvalidTaskRequirementsError'
+  }
+}
+
 /**
  * Raised when an agent or orchestrator run exceeds its configured token budget.
  */
@@ -102,6 +121,7 @@ function extractStatus(error: unknown): number | undefined {
  * limits (429), and all 5xx server errors — is retryable.
  */
 export function isRetryableError(error: unknown): boolean {
+  if (error instanceof InvalidTaskRequirementsError) return false
   if (error instanceof TokenBudgetExceededError) return false
   if (error instanceof CostBudgetExceededError) return false
   if (error instanceof InvalidMessageError) return false

@@ -150,14 +150,15 @@ const orchestrator = new OpenMultiAgent({
 
 | Strategy | Assignment behavior | Recommended when |
 |----------|---------------------|------------------|
-| `dependency-first` (default) | Assigns tasks that unblock the most downstream work first, rotating agents | The task graph has meaningful dependencies |
-| `round-robin` | Distributes tasks in queue order across the roster | Agents are interchangeable |
-| `least-busy` | Chooses the agent with the fewest active or newly assigned tasks | Task duration varies and load balance matters |
+| `dependency-first` (default) | Assigns tasks that unblock the most downstream work first, rotating eligible agents | The task graph has meaningful dependencies |
+| `round-robin` | Distributes tasks in queue order across eligible agents | Agents are interchangeable |
+| `least-busy` | Chooses the eligible agent with the fewest active or newly assigned tasks | Task duration varies and load balance matters |
 | `capability-match` | Filters explicit task requirements, then prefers declared capability tags before legacy keyword affinity | Tasks or agents declare differentiated requirements/capabilities |
-| `composite` | Ranks tasks by blocked dependents, hard-filters with `AgentSelector`, then maximizes `fitWeight * fit + loadWeight * (1 - normalizedCurrentLoad)` | Criticality, capability fit, and current load should influence one decision |
+| `composite` | Ranks tasks by blocked dependents, then maximizes fit and available capacity across eligible agents | Criticality, capability fit, and current load should influence one decision |
 
 Agents may declare `description`, `capabilities`, `costTier`, and
-`latencyClass`, and tasks may add hard `requires` constraints; set
+`latencyClass`, and tasks may add hard `requires` constraints. All strategies
+fail before worker execution when those constraints cannot be satisfied; set
 `strictAssignees: true` to fail fast when a coordinator plan names an agent
 outside the roster. Weight semantics, load normalization, `NO_ELIGIBLE_AGENT`
 and `INVALID_ASSIGNEE` behavior, approval compatibility, and progress-event

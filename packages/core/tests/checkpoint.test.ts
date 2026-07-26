@@ -336,6 +336,62 @@ describe('OpenMultiAgent checkpoint/restore', () => {
     expect((await resumedTeam.getSharedMemoryInstance()!.read('seed/note'))?.value).toEqual({ keep: true })
   })
 
+  it('restores requirements and validates pending work against the resumed roster', async () => {
+    const checkpointStore = new InMemoryStore()
+    const scripted = scriptedAdapter(['first output', 'must not run'])
+    const abort = new AbortController()
+    const orchestrator = new OpenMultiAgent({
+      onProgress(event) {
+        if (event.type === 'task_complete') abort.abort()
+      },
+    })
+    const initialTeam = new Team({
+      name: 'team',
+      agents: [{
+        ...worker('worker', scripted.adapter),
+        capabilities: ['typescript'],
+      }],
+    })
+    const constrainedTasks: RunTaskSpec[] = [
+      {
+        title: 'first',
+        description: 'do first',
+        assignee: 'worker',
+        requires: { requiredCapabilities: ['typescript'] },
+      },
+      {
+        title: 'second',
+        description: 'do second',
+        assignee: 'worker',
+        dependsOn: ['first'],
+        requires: { requiredCapabilities: ['typescript'] },
+      },
+    ]
+
+    await orchestrator.runTasks(initialTeam, constrainedTasks, {
+      abortSignal: abort.signal,
+      checkpoint: { store: checkpointStore },
+    })
+    expect(scripted.calls()).toBe(1)
+
+    const resumedTeam = new Team({
+      name: 'team',
+      agents: [worker('worker', scripted.adapter)],
+    })
+    await expect(orchestrator.restore(resumedTeam, {
+      checkpoint: { store: checkpointStore },
+    })).rejects.toMatchObject({
+      code: 'INVALID_TASK_REQUIREMENTS',
+      issues: [
+        expect.objectContaining({
+          code: 'ASSIGNEE_REQUIREMENTS_MISMATCH',
+          taskTitle: 'second',
+        }),
+      ],
+    })
+    expect(scripted.calls()).toBe(1)
+  })
+
   it('restore against an empty store starts a fresh task run', async () => {
     const store = new InMemoryStore()
     const scripted = scriptedAdapter(['fresh output'])
@@ -353,6 +409,31 @@ describe('OpenMultiAgent checkpoint/restore', () => {
     expect(scripted.calls()).toBe(1)
     expect(result.tasks?.[0]?.status).toBe('completed')
     expect((await store.list()).some((entry) => isCheckpointKey(entry.key))).toBe(true)
+  })
+
+  it('restore against an empty store preserves and validates task requirements', async () => {
+    const store = new InMemoryStore()
+    const scripted = scriptedAdapter(['must not run'])
+    const team = new Team({
+      name: 'team',
+      agents: [worker('worker', scripted.adapter)],
+      sharedMemoryStore: store,
+    })
+    const orchestrator = new OpenMultiAgent()
+
+    await expect(orchestrator.restore(team, [{
+      title: 'restricted',
+      description: 'requires a missing capability',
+      assignee: 'worker',
+      requires: { requiredCapabilities: ['missing'] },
+    }], { checkpoint: { store } })).rejects.toMatchObject({
+      code: 'INVALID_TASK_REQUIREMENTS',
+      issues: [
+        expect.objectContaining({ code: 'ASSIGNEE_REQUIREMENTS_MISMATCH' }),
+      ],
+    })
+
+    expect(scripted.calls()).toBe(0)
   })
 
   it('checkpoint/restore works with a custom async MemoryStore', async () => {

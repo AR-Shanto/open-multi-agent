@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   isRetryableError,
+  InvalidTaskRequirementsError,
   TokenBudgetExceededError,
   InvalidMessageError,
   LLMCallTimeoutError,
@@ -37,9 +38,15 @@ describe('isRetryableError', () => {
     expect(isRetryableError({ statusCode: 503 })).toBe(true)
   })
 
-  it('classifies budget and invalid-message framework errors as terminal', () => {
+  it('classifies budget, invalid-message, and task-requirement errors as terminal', () => {
     expect(isRetryableError(new TokenBudgetExceededError('a', 100, 50))).toBe(false)
     expect(isRetryableError(new InvalidMessageError('bad'))).toBe(false)
+    expect(isRetryableError(new InvalidTaskRequirementsError([{
+      code: 'NO_ELIGIBLE_AGENT',
+      taskId: 'task-1',
+      taskTitle: 'Restricted',
+      reasons: ['worker excluded'],
+    }]))).toBe(false)
   })
 
   it('classifies a per-call timeout as retryable', () => {

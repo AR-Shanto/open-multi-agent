@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { AgentSelector } from '../src/orchestrator/agent-selector.js'
+import {
+  AgentSelector,
+  validateTaskRequirements,
+} from '../src/orchestrator/agent-selector.js'
 import { Scheduler } from '../src/orchestrator/scheduler.js'
 import { createTask } from '../src/task/task.js'
-import type { AgentConfig } from '../src/types.js'
+import type { AgentConfig, TaskRequirements } from '../src/types.js'
 
 describe('AgentSelector', () => {
   it('hard-filters a high-keyword candidate that lacks a required tool', () => {
@@ -78,6 +81,46 @@ describe('AgentSelector', () => {
     })
   })
 
+  it.each<{
+    requirements: TaskRequirements
+    candidate: AgentConfig
+    reason: string
+  }>([
+    {
+      requirements: { requiredTools: ['file_edit'] },
+      candidate: { name: 'reader', model: 'test', tools: ['file_read'] },
+      reason: 'missing required tools',
+    },
+    {
+      requirements: { requiredCapabilities: ['typescript'] },
+      candidate: { name: 'generalist', model: 'test' },
+      reason: 'missing required capabilities',
+    },
+    {
+      requirements: { requiredBackend: 'process' },
+      candidate: { name: 'llm-worker', model: 'test' },
+      reason: 'does not satisfy required backend process',
+    },
+    {
+      requirements: { requiredProvider: 'anthropic' },
+      candidate: { name: 'openai-worker', model: 'test', provider: 'openai' },
+      reason: 'does not satisfy required provider anthropic',
+    },
+  ])('hard-filters each requirement field independently', ({
+    requirements,
+    candidate,
+    reason,
+  }) => {
+    const result = new AgentSelector().select({
+      title: 'Restricted',
+      description: 'Restricted task',
+      requires: requirements,
+    }, [candidate])
+
+    expect(result.error?.code).toBe('NO_ELIGIBLE_AGENT')
+    expect(result.error?.reasons.join(' ')).toContain(reason)
+  })
+
   it('handles one candidate and empty requirements as pure soft scoring', () => {
     const solo: AgentConfig = {
       name: 'solo',
@@ -145,5 +188,44 @@ describe('Scheduler capability-match with AgentSelector', () => {
     expect(() => new Scheduler('capability-match').schedule([task], [
       { name: 'reader', model: 'test', tools: ['file_read'] },
     ])).toThrow('NO_ELIGIBLE_AGENT')
+  })
+})
+
+describe('task requirement preflight', () => {
+  it('reports an explicit assignee that does not satisfy requirements', () => {
+    const task = createTask({
+      title: 'Edit',
+      description: 'Edit a file.',
+      assignee: 'reader',
+      requires: { requiredTools: ['file_edit'] },
+    })
+
+    expect(validateTaskRequirements([task], [
+      { name: 'reader', model: 'test', tools: ['file_read'] },
+      { name: 'editor', model: 'test', tools: ['file_edit'] },
+    ])).toEqual([
+      expect.objectContaining({
+        code: 'ASSIGNEE_REQUIREMENTS_MISMATCH',
+        taskId: task.id,
+        assignee: 'reader',
+      }),
+    ])
+  })
+
+  it('reports an unassigned task when the full roster is ineligible', () => {
+    const task = createTask({
+      title: 'Anthropic task',
+      description: 'Use the required provider.',
+      requires: { requiredProvider: 'anthropic' },
+    })
+
+    expect(validateTaskRequirements([task], [
+      { name: 'openai-worker', model: 'test', provider: 'openai' },
+    ])).toEqual([
+      expect.objectContaining({
+        code: 'NO_ELIGIBLE_AGENT',
+        taskId: task.id,
+      }),
+    ])
   })
 })

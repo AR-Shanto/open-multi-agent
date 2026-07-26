@@ -38,6 +38,8 @@ import {
   type RunContext,
   type RevealCoordinatorContext,
 } from './run-context.js'
+import { InvalidTaskRequirementsError } from '../errors.js'
+import { validateTaskRequirements } from './agent-selector.js'
 import { recordRunUsage, buildCostEstimateContext } from './budget.js'
 import {
   routeMatches,
@@ -541,6 +543,31 @@ export async function executeQueue(
       const completedThisRound: Task[] = []
 
       const dispatchPromises = pending.map(async (task): Promise<void> => {
+      const requirementIssues = validateTaskRequirements(
+        [task],
+        team.getAgents(),
+        {
+          defaultProvider: config.defaultProvider,
+          defaultToolPreset: config.defaultToolPreset,
+          includeDelegateTool: true,
+          resolveCandidate: (candidateTask, candidate) => {
+            const base = applyDefaultToolPreset(
+              applyAgentDefaults(candidate, config),
+              config.defaultToolPreset,
+            )
+            return withModelRoute(base, routeMatches(ctx.modelRouting, {
+              phase: 'worker',
+              agent: candidate.name,
+              task: candidateTask,
+              leaf: ctx.taskLeafById.get(candidateTask.id),
+            }))
+          },
+        },
+      )
+      if (requirementIssues.length > 0) {
+        throw new InvalidTaskRequirementsError(requirementIssues)
+      }
+
       // Mark in-progress
       queue.update(task.id, { status: 'in_progress' as TaskStatus })
 
@@ -733,9 +760,14 @@ export async function executeQueue(
           applyAgentDefaults(agentConfig, config),
           config.defaultToolPreset,
         )
-        const routedConfigs = routeChain(workerRoute).map(route =>
-          withModelRoute(workerBaseConfig, route),
-        )
+        const routedConfigs = routeChain(workerRoute)
+          .map(route => withModelRoute(workerBaseConfig, route))
+          .filter(candidate =>
+            validateTaskRequirements([task], [candidate], {
+              defaultProvider: config.defaultProvider,
+              defaultToolPreset: config.defaultToolPreset,
+              includeDelegateTool: true,
+            }).length === 0)
         const workerEffectiveConfig = routedConfigs[0] ?? workerBaseConfig
         const routedAgents = routedConfigs.map(route =>
           buildAgent(route, { includeDelegateTool: true }),

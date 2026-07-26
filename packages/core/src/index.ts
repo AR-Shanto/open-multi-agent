@@ -86,7 +86,10 @@ export type {
   SchedulerOptions,
   SchedulerWarning,
 } from './orchestrator/scheduler.js'
-export { AgentSelector } from './orchestrator/agent-selector.js'
+export {
+  AgentSelector,
+  validateTaskRequirements,
+} from './orchestrator/agent-selector.js'
 export type {
   AgentSelectionFailure,
   AgentSelectionResult,
@@ -172,7 +175,7 @@ export type { RegisterBuiltInToolsOptions } from './tool/built-in/index.js'
 
 export { createAdapter } from './llm/adapter.js'
 export type { SupportedProvider } from './llm/adapter.js'
-export { TokenBudgetExceededError, CostBudgetExceededError, InvalidMessageError, LLMCallTimeoutError, isRetryableError } from './errors.js'
+export { TokenBudgetExceededError, CostBudgetExceededError, InvalidMessageError, InvalidTaskRequirementsError, LLMCallTimeoutError, isRetryableError } from './errors.js'
 export { createRunIdentity, createRestoreIdentity, validateRunId } from './observability/identity.js'
 export { classifyRunFailure } from './observability/status.js'
 export type {
@@ -328,6 +331,7 @@ export type {
   RunTasksOptions,
   RunTaskSpec,
   TaskMetadata,
+  TaskRequirementIssue,
   TaskRequirements,
   RestoreOptions,
   ModelRouteConfig,
