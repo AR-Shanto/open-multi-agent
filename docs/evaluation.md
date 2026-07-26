@@ -673,6 +673,43 @@ corpus against these gates:
   usage; and
 - P95 end-to-end latency regression no greater than 10%.
 
+### Running the real-provider Shadow gate
+
+`packages/core/tests/e2e/semantic-routing-shadow.test.ts` runs the reviewed
+synthetic corpus through the actual `LLMTaskProfiler`, then applies the same
+deterministic policy that Hybrid routing uses. It is skipped unless
+`SEMANTIC_ROUTING_SHADOW=1` is set, executes no workers or tools, and does not
+send user data. The profiler uses the shipping `LLMTaskProfiler` default of 800
+output tokens per fixture, so the canary validates the production contract. The
+optional `SEMANTIC_ROUTING_SHADOW_BASE_URL` and
+`SEMANTIC_ROUTING_SHADOW_REGION` values map to the selected adapter; Bedrock
+uses its normal AWS credential chain instead of the API-key variable.
+
+For DeepSeek V4, the built-in profiler explicitly uses non-thinking mode: this
+is a bounded JSON classification call, and DeepSeek otherwise enables thinking
+by default. The production route and this gate use the same setting.
+
+Set credentials only in your local shell or CI secret store; never paste a key
+into a command, repository file, or test log. For example, map an existing
+local provider secret without printing it:
+
+```bash
+export SEMANTIC_ROUTING_SHADOW=1
+export SEMANTIC_ROUTING_SHADOW_PROVIDER=openai
+export SEMANTIC_ROUTING_SHADOW_MODEL=gpt-4o-mini
+export SEMANTIC_ROUTING_SHADOW_API_KEY="$OPENAI_API_KEY"
+npm run test:semantic-routing-shadow -w @open-multi-agent/core
+```
+
+The report contains only provider/model identifiers, aggregate accuracy,
+failure and mismatch case IDs, P95 profiler latency, and aggregate token use.
+It deliberately omits goals, inferred reasons, raw model output, and all
+configuration secrets. The executable gate enforces zero invalid profiles,
+zero critical false-Single outcomes, and at least 95% reviewed routing
+accuracy. Record the output as release evidence. Measure the remaining
+end-to-end token and latency regression gates in the production-shadow canary
+before declaring a provider/model supported for Hybrid routing.
+
 Historical success rates, online adaptive learning, and Team-to-Single
 optimization require separately versioned evaluation, monitoring, and rollback
 and are not part of V1.

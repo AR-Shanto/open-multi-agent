@@ -131,6 +131,13 @@ export class LLMTaskProfiler implements TaskProfiler {
       model: this.model,
       maxTokens: this.maxTokens,
       temperature: 0,
+      // DeepSeek V4 enables thinking by default. Profiling is a bounded
+      // classification call whose only useful output is the JSON profile;
+      // leaving thinking enabled can spend its whole output budget on
+      // reasoning_content before producing that profile.
+      ...(this.adapter.name === 'deepseek'
+        ? { extraBody: { thinking: { type: 'disabled' } } }
+        : {}),
       systemPrompt:
         TASK_PROFILER_SYSTEM_PROMPT
         + buildStructuredOutputInstruction(rawTaskProfileSchema),

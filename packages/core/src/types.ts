@@ -1420,7 +1420,7 @@ export type RoutingFailurePolicy = 'fallback' | 'fail'
 
 /** Hybrid execution-routing controls shared by orchestrator and per-run config. */
 export interface ExecutionRoutingConfig {
-  /** Defaults to `hybrid`. Use `deterministic` for the legacy no-profiler path. */
+  /** Defaults to `deterministic`. Set `hybrid` to opt into semantic profiling. */
   readonly strategy?: ExecutionRoutingStrategy
   /** Custom profiler. When omitted, OMA builds an {@link LLMTaskProfiler}. */
   readonly profiler?: TaskProfiler
@@ -1944,10 +1944,10 @@ export interface OrchestratorConfig {
    */
   readonly executionRouter?: ExecutionRouter
   /**
-   * Default hybrid execution-routing configuration.
+   * Default execution-routing configuration.
    *
-   * Omitted means `strategy: 'hybrid'`. Use
-   * `{ strategy: 'deterministic' }` to restore the legacy no-profiler path.
+   * Omitted means `strategy: 'deterministic'`. Set
+   * `{ strategy: 'hybrid' }` to opt into semantic profiling.
    */
   readonly executionRouting?: ExecutionRoutingConfig
   /**

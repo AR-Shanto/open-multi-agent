@@ -303,7 +303,7 @@ async function runActualRoute(
   const adapter = fixedAdapter()
   const orchestrator = new OpenMultiAgent({
     defaultModel: 'mock-model',
-    executionRouting: { profiler: fixedProfiler() },
+    executionRouting: { strategy: 'hybrid', profiler: fixedProfiler() },
   })
   const team = orchestrator.createTeam(`routing-stability-${family.id}-${variant.id}`, {
     name: `routing-stability-${family.id}`,

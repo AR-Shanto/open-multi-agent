@@ -109,20 +109,21 @@ Set `OPENAI_API_KEY` for this example. For other hosted or local models, see [Pr
 
 Use `planOnly` to inspect a generated task graph before execution, then `createPlanArtifact()` and `runFromPlan()` to replay it. `runConsensus()` adds a proposer→judge verification loop when one answer needs extra scrutiny.
 
-Automatic `runTeam()` uses Hybrid Semantic Routing by default. The cheap
-`DeterministicRouter` keeps Team decisions and sends only Single candidates to
-a one-call, no-tool `TaskProfiler`; deterministic policy may keep Single,
-upgrade to Team, or require an explicit governance declaration. Valid custom
-`executionRouter` decisions, explicit `mode`, and declared governance retain
-higher priority. Set `executionRouting: { strategy: 'deterministic' }` for the
-legacy no-profiler path. Auto results expose `routingDecision` and, when
-profiling ran, `semanticRoutingAssessment`. See [Execution
+Automatic `runTeam()` uses the deterministic router by default: no extra model
+call is made. Opt into Hybrid Semantic Routing with
+`executionRouting: { strategy: 'hybrid' }`; it keeps deterministic Team
+decisions and sends only Single candidates to a one-call, no-tool
+`TaskProfiler`. Deterministic policy may keep Single, upgrade to Team, or
+require an explicit governance declaration. Valid custom `executionRouter`
+decisions, explicit `mode`, and declared governance retain higher priority.
+Auto results expose `routingDecision` and, when profiling ran,
+`semanticRoutingAssessment`. See [Execution
 Routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/execution-routing.md).
 Execution Routing selects Single versus Team; [Model
 Routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)
 selects models inside that topology.
 
-The Profiler sends the goal to the configured routing adapter, then the
+When Hybrid is enabled, the Profiler sends the goal to the configured routing adapter, then the
 Coordinator adapter, or finally the orchestrator's default provider. That last
 fallback can make a provider call even when every worker has its own adapter.
 Configure `executionRouting.adapter` or use deterministic strategy when the goal
