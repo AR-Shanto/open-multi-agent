@@ -972,9 +972,34 @@ export class OpenMultiAgent {
           },
         })
       }
-      // Map title-based dependsOn references to real task IDs so we can
-      // build the dependency graph before adding tasks to the queue.
-      loadSpecsIntoQueue(taskSpecs, agentConfigs, queue, options?.verifyJudges)
+      // Map title-based dependsOn references to real task IDs and reject an
+      // invalid coordinator DAG before any task can be dispatched or the
+      // coordinator can synthesise an answer from incomplete work.
+      try {
+        loadSpecsIntoQueue(taskSpecs, agentConfigs, queue, options?.verifyJudges)
+      } catch (error) {
+        const classified = classifyRunFailure(error, { kind: 'validation' })
+        this.config.onProgress?.({
+          type: 'agent_complete',
+          agent: 'coordinator',
+          data: decompositionResult,
+        })
+        this.config.onProgress?.({
+          type: 'error',
+          data: {
+            code: 'INVALID_TASK_DEPENDENCIES',
+            error: classified.errorInfo,
+          },
+        })
+        return finish(this.buildTeamRunResult(
+          agentResults,
+          identity,
+          goal,
+          [],
+          classified.status,
+          classified.errorInfo,
+        ))
+      }
     } else {
       // Coordinator failed to produce structured output — fall back to
       // one task per agent using the goal as the description.
@@ -1419,6 +1444,10 @@ export class OpenMultiAgent {
     const identity = createRestoreIdentity(snapshot, restoreIdentityOptions)
 
     const queue = TaskQueue.fromSnapshot(snapshot.queue, { resetInProgress: true })
+    const validation = validateTaskDependencies(queue.list())
+    if (!validation.valid) {
+      throw new Error(`Invalid checkpoint task dependencies: ${validation.errors.join(' ')}`)
+    }
     const agentResults = this.agentResultsFromCheckpoint(snapshot, queue)
     const checkpointForResume: ActiveCheckpoint | undefined = activeCheckpoint
       ? {
@@ -2035,6 +2064,7 @@ export class OpenMultiAgent {
     tasks?: readonly TaskExecutionRecord[],
     forcedStatus?: RunStatus,
     forcedErrorInfo?: StructuredTraceError,
+    allowIncompleteTasks = false,
   ): TeamRunResult {
     let totalUsage: TokenUsage = ZERO_USAGE
     let overallSuccess = true
@@ -2092,11 +2122,16 @@ export class OpenMultiAgent {
       .filter((status): status is RunStatus => status !== undefined)
     const firstStatus = (code: RunStatus['code']) => statuses.find((status) => status.code === code)
     const taskFailed = tasks?.some((task) => task.status === 'failed') ?? false
+    const taskIncomplete = tasks?.some((task) =>
+      task.status === 'pending' || task.status === 'in_progress' || task.status === 'blocked'
+    ) ?? false
     const status = forcedStatus
       ?? firstStatus('budget_exhausted')
       ?? firstStatus('timeout')
       ?? firstStatus('cancelled')
-      ?? (overallSuccess && !taskFailed ? statusOnly('ok') : statusOnly('error'))
+      ?? (overallSuccess && !taskFailed && (!taskIncomplete || allowIncompleteTasks)
+        ? statusOnly('ok')
+        : statusOnly('error'))
     const errorInfo = forcedErrorInfo ?? [...agentResults.values()]
       .find((result) => result.status?.code === status.code && result.errorInfo !== undefined)
       ?.errorInfo
@@ -2142,7 +2177,7 @@ export class OpenMultiAgent {
       metrics: undefined,
     }))
     return {
-      ...this.buildTeamRunResult(agentResults, identity, goal, tasks),
+      ...this.buildTeamRunResult(agentResults, identity, goal, tasks, undefined, undefined, true),
       planOnly: true,
     }
   }

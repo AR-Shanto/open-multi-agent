@@ -23,7 +23,7 @@ import type {
 } from '../types.js'
 import type { Team } from '../team/team.js'
 import type { TaskQueue } from '../task/queue.js'
-import { createTask } from '../task/task.js'
+import { createTask, validateTaskDependencies } from '../task/task.js'
 import { classifyRunFailure } from '../observability/status.js'
 import type { TraceRuntime, TraceSpan } from '../observability/runtime.js'
 import { totalTokens, DEFAULT_MODEL } from './run-context.js'
@@ -673,13 +673,16 @@ export function loadSpecsIntoQueue(
     createdTasks.push(task)
   }
 
-  // Second pass: resolve title-based dependsOn to IDs.
+  // Second pass: resolve title-based dependsOn to IDs. Keep the resolved
+  // tasks local until the whole graph has been validated so callers never
+  // observe a partially loaded invalid plan.
+  const resolvedTasks: Array<{ task: Task; unresolvedDeps: string[] }> = []
   for (let i = 0; i < createdTasks.length; i++) {
     const spec = specs[i]!
     const task = createdTasks[i]!
 
     if (!spec.dependsOn || spec.dependsOn.length === 0) {
-      queue.add(task)
+      resolvedTasks.push({ task, unresolvedDeps: [] })
       continue
     }
 
@@ -703,7 +706,19 @@ export function loadSpecsIntoQueue(
       ...task,
       dependsOn: resolvedDeps.length > 0 ? resolvedDeps : undefined,
     }
-    queue.add(taskWithDeps)
+    resolvedTasks.push({ task: taskWithDeps, unresolvedDeps })
+  }
+
+  const validation = validateTaskDependencies(resolvedTasks.map(({ task }) => task))
+  if (!validation.valid) {
+    throw Object.assign(
+      new Error(`Invalid task dependencies: ${validation.errors.join(' ')}`),
+      { code: 'INVALID_TASK_DEPENDENCIES' },
+    )
+  }
+
+  for (const { task, unresolvedDeps } of resolvedTasks) {
+    queue.add(task)
     if (unresolvedDeps.length > 0) {
       queue.fail(
         task.id,
