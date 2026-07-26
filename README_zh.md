@@ -60,7 +60,7 @@ OMA 将动态编排与生产所需的控制、证据和恢复能力结合起来�
 
 - **生产必备。** 让运行可恢复、故障可诊断，并及时发现质量退化。
 
-  - **可靠性：** 通过 Checkpoint 从断点恢复中断的运行；重试、超时、循环检测与 token、成本双预算让执行始终有明确边界。
+  - **可靠性：** 通过 Checkpoint 从断点恢复中断的运行，或选择在任务结果屏障处启用仅追加式计划修复；重试、超时、循环检测与 token、成本双预算让执行始终有明确边界。
   - **可观测性：** 通过稳定的运行标识、执行回执与 Trace 跟踪每次运行；使用 TraceStore 查询记录，在离线 Run Viewer 中回放任务 DAG 与 span 瀑布，或通过可选的 OpenTelemetry 适配器导出。
   - **评测：** 使用同一套运行记录支撑版本化 EvalSet、参考 scorer 打分、离线报告、CI gate、回归基线与线上采样。
   - **安全与隐私：** 内置工具默认拒绝，支持逐次调用 gate，并对遥测与持久化状态应用显式的隐私控制。
@@ -157,7 +157,7 @@ Core 用户可以在本地保存 trace，并用离线 Run Viewer 查看。只有
 |---|---|
 | 安装与运行 | [核心包使用指南](packages/core/README_zh.md) · [示例](packages/core/examples/README.md) · [CLI](docs/cli.md) |
 | 配置模型与工具 | [Provider](docs/providers.md) · [工具与沙箱](docs/tool-configuration.md) · [外部 Agent](docs/external-agents.md) |
-| 稳定运行 | [可观测性](docs/observability.md) · [评测](docs/evaluation.md) · [Checkpoint 与恢复](docs/checkpoint.md) · [上下文管理](docs/context-management.md) |
+| 稳定运行 | [可观测性](docs/observability.md) · [评测](docs/evaluation.md) · [Checkpoint 与恢复](docs/checkpoint.md) · [自适应恢复](docs/adaptive-recovery.md) · [上下文管理](docs/context-management.md) |
 | 控制编排 | [Consensus](docs/consensus.md) · [执行路由](docs/execution-routing.md) · [模型路由](docs/model-routing.md) · [任务调度](docs/task-scheduling.md) · [计划回放](docs/plan-replay.md) · [共享记忆](docs/shared-memory.md) |
 
 ## 参与贡献

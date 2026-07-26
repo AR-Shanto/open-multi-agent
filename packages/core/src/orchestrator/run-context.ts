@@ -28,6 +28,7 @@ import type { Team } from '../team/team.js'
 import type { Scheduler } from './scheduler.js'
 import type { Checkpoint } from '../memory/checkpoint.js'
 import type { TraceRuntime, TraceSpan } from '../observability/runtime.js'
+import type { ResolvedRecoveryOptions } from './recovery.js'
 import { createRunIdentity, validateRunMetadata } from '../observability/identity.js'
 
 export const ZERO_USAGE: TokenUsage = { input_tokens: 0, output_tokens: 0 }
@@ -166,8 +167,10 @@ export interface RunContext {
    */
   readonly revealCoordinatorContext?: RevealCoordinatorContext
   readonly modelRouting?: ModelRoutingPolicy
-  readonly taskById: ReadonlyMap<string, Task>
-  readonly taskLeafById: ReadonlyMap<string, boolean>
+  readonly taskById: Map<string, Task>
+  readonly taskLeafById: Map<string, boolean>
+  readonly recovery: ResolvedRecoveryOptions
+  readonly recoveryPatchSignatures: Set<string>
 }
 
 export interface ActiveCheckpoint {

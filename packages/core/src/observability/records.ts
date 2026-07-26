@@ -29,6 +29,8 @@ export type SpanEventName =
   | 'loop_detected'
   | 'stream_chunk'
   | 'consensus_verdict'
+  | 'recovery_decision'
+  | 'plan_revision_applied'
 
 export interface TraceRecordBase {
   readonly schemaVersion: 2

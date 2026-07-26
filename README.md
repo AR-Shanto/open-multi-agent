@@ -60,7 +60,7 @@ OMA combines dynamic orchestration with the control, evidence, and recovery path
 
 - **Production essentials.** Run reliably, diagnose failures, and prevent quality regressions.
 
-  - **Reliability:** Resume interrupted runs from checkpoints. Retries, timeouts, loop detection, and token and cost budgets keep execution bounded.
+  - **Reliability:** Resume interrupted runs from checkpoints or opt into append-only plan repair at task outcome barriers. Retries, timeouts, loop detection, and token and cost budgets keep execution bounded.
   - **Observability:** Follow each run through stable identity, execution receipts, and traces; query them in TraceStore, replay the task DAG and span waterfall in the offline Run Viewer, or export through the optional OpenTelemetry adapter.
   - **Evaluation:** Use the same run records for versioned EvalSets, reference scorers, offline reports, CI gates, regression baselines, and production sampling.
   - **Safety and privacy:** Keep tools default-deny, gate individual calls, and apply explicit privacy controls to telemetry and persisted state.
@@ -153,7 +153,7 @@ Need to embed agent capabilities in an existing product or business system? Emai
 |---|---|
 | Install and run | [Core package guide](packages/core/README.md) · [Examples](packages/core/examples/README.md) · [CLI](docs/cli.md) |
 | Configure models and tools | [Providers](docs/providers.md) · [Tools and sandbox](docs/tool-configuration.md) · [External agents](docs/external-agents.md) |
-| Operate reliably | [Observability](docs/observability.md) · [Evaluation](docs/evaluation.md) · [Checkpoint and resume](docs/checkpoint.md) · [Context management](docs/context-management.md) |
+| Operate reliably | [Observability](docs/observability.md) · [Evaluation](docs/evaluation.md) · [Checkpoint and resume](docs/checkpoint.md) · [Adaptive recovery](docs/adaptive-recovery.md) · [Context management](docs/context-management.md) |
 | Control orchestration | [Consensus](docs/consensus.md) · [Execution routing](docs/execution-routing.md) · [Model routing](docs/model-routing.md) · [Task scheduling](docs/task-scheduling.md) · [Plan replay](docs/plan-replay.md) · [Shared memory](docs/shared-memory.md) |
 
 ## Contributing
