@@ -157,9 +157,9 @@ const orchestrator = new OpenMultiAgent({
 | `composite` | Ranks tasks by blocked dependents, hard-filters with `AgentSelector`, then maximizes `fitWeight * fit + loadWeight * (1 - normalizedCurrentLoad)` | Criticality, capability fit, and current load should influence one decision |
 
 Agents may declare `description`, `capabilities`, `costTier`, and
-`latencyClass`, and tasks may add hard `requires` constraints; set
-`strictAssignees: true` to fail fast when a coordinator plan names an agent
-outside the roster. Weight semantics, load normalization, `NO_ELIGIBLE_AGENT`
+`latencyClass`, and tasks may add hard `requires` constraints. Coordinator
+plans fail fast by default when they name an agent outside the roster; set
+`strictAssignees: false` only to retain legacy reassignment. Weight semantics, load normalization, `NO_ELIGIBLE_AGENT`
 and `INVALID_ASSIGNEE` behavior, approval compatibility, and progress-event
 migration are covered in
 [Task scheduling and dispatch](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/task-scheduling.md).
