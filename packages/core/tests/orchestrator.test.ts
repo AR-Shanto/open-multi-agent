@@ -1091,9 +1091,12 @@ describe('OpenMultiAgent', () => {
       expect(result.agentResults.has('coordinator')).toBe(true)
     })
 
-    it('returns a validation failure for a coordinator-generated cyclic DAG', async () => {
+    it('repairs a coordinator-generated cyclic DAG before dispatch', async () => {
       mockAdapterResponses = [
         '```json\n[{"title":"Task A","description":"Do A","assignee":"worker-a","dependsOn":["Task B"]},{"title":"Task B","description":"Do B","assignee":"worker-b","dependsOn":["Task A"]}]\n```',
+        '```json\n[{"title":"Research","description":"Research the topic","assignee":"worker-a"}]\n```',
+        'research output',
+        'final answer',
       ]
       const events: OrchestratorEvent[] = []
       const oma = new OpenMultiAgent({
@@ -1107,31 +1110,56 @@ describe('OpenMultiAgent', () => {
         'First research the topic, then produce a detailed report with recommendations.',
       )
 
-      expect(result.success).toBe(false)
-      expect(result.status?.code).toBe('error')
-      expect(result.errorInfo).toMatchObject({ kind: 'validation' })
-      expect(result.tasks).toEqual([])
-      expect(capturedPrompts).toHaveLength(1)
-      expect(events).toContainEqual(expect.objectContaining({
-        type: 'error',
-        data: expect.objectContaining({ code: 'INVALID_TASK_DEPENDENCIES' }),
-      }))
+      expect(result.success).toBe(true)
+      expect(result.tasks).toHaveLength(1)
+      expect(capturedPrompts).toHaveLength(4)
+      expect(events.some((event) => event.type === 'error')).toBe(false)
     })
 
-    it('falls back to one-task-per-agent when coordinator output is unparseable', async () => {
+    it('fails closed when coordinator output remains unparseable after repair', async () => {
       mockAdapterResponses = [
         'I cannot produce JSON output', // invalid coordinator output
-        'worker-a result',
-        'worker-b result',
-        'synthesis',
+        'Still not JSON', // repair also fails
       ]
 
-      const oma = new OpenMultiAgent({ defaultModel: 'mock-model' })
+      const events: OrchestratorEvent[] = []
+      const oma = new OpenMultiAgent({
+        defaultModel: 'mock-model',
+        onProgress: (event) => events.push(event),
+      })
       const team = oma.createTeam('t', teamCfg())
 
       const result = await oma.runTeam(team, 'First design the database schema, then implement the REST API endpoints')
 
-      expect(result.success).toBe(true)
+      expect(result.success).toBe(false)
+      expect(result.status?.code).toBe('error')
+      expect(result.errorInfo).toMatchObject({ kind: 'validation', code: 'COORDINATOR_PLAN_INVALID' })
+      expect(result.tasks).toEqual([])
+      expect(capturedPrompts).toHaveLength(2)
+      expect(events).toContainEqual(expect.objectContaining({
+        type: 'error',
+        data: expect.objectContaining({ code: 'COORDINATOR_PLAN_INVALID' }),
+      }))
+    })
+
+    it('rejects a partially malformed coordinator plan instead of executing its valid subset', async () => {
+      const malformedPlan = '```json\n[' +
+        '{"title":"Research","description":"Research the topic","assignee":"worker-a"},' +
+        '{"title":"Broken","assignee":"worker-b"}' +
+        ']\n```'
+      mockAdapterResponses = [malformedPlan, malformedPlan]
+
+      const oma = new OpenMultiAgent({ defaultModel: 'mock-model' })
+      const team = oma.createTeam('t', teamCfg())
+
+      const result = await oma.runTeam(
+        team,
+        'First research the topic, then produce a detailed report with recommendations.',
+      )
+
+      expect(result.success).toBe(false)
+      expect(result.tasks).toEqual([])
+      expect(capturedPrompts).toHaveLength(2)
     })
 
     it('uses schedulingStrategy for unassigned coordinator tasks', async () => {
@@ -1263,13 +1291,14 @@ describe('OpenMultiAgent', () => {
       expect(capturedPrompts).toHaveLength(1)
     })
 
-    it('warns and schedules a coordinator task with an invalid assignee by default', async () => {
+    it('warns and schedules a coordinator task with an invalid assignee only when legacy reassignment is explicit', async () => {
       mockAdapterResponses = [
         '```json\n[{"title":"Research","description":"Research the topic","assignee":"ghost"}]\n```',
       ]
       const events: OrchestratorEvent[] = []
       const oma = new OpenMultiAgent({
         defaultModel: 'mock-model',
+        strictAssignees: false,
         onProgress: (event) => events.push(event),
       })
       const team = oma.createTeam('t', teamCfg([agentConfig('worker-a')]))
@@ -1294,14 +1323,14 @@ describe('OpenMultiAgent', () => {
       })
     })
 
-    it('returns a structured validation error for an invalid assignee in strict mode', async () => {
+    it('returns a structured validation error for an invalid assignee by default', async () => {
       mockAdapterResponses = [
+        '```json\n[{"title":"Research","description":"Research the topic","assignee":"ghost"}]\n```',
         '```json\n[{"title":"Research","description":"Research the topic","assignee":"ghost"}]\n```',
       ]
       const events: OrchestratorEvent[] = []
       const oma = new OpenMultiAgent({
         defaultModel: 'mock-model',
-        strictAssignees: true,
         onProgress: (event) => events.push(event),
       })
       const team = oma.createTeam('t', teamCfg([agentConfig('worker-a')]))
@@ -1316,12 +1345,12 @@ describe('OpenMultiAgent', () => {
       expect(result.status?.code).toBe('error')
       expect(result.errorInfo).toMatchObject({
         kind: 'validation',
-        code: 'INVALID_ASSIGNEE',
+        code: 'COORDINATOR_PLAN_INVALID',
       })
       expect(result.tasks).toEqual([])
       expect(events).toContainEqual(expect.objectContaining({
         type: 'error',
-        data: expect.objectContaining({ code: 'INVALID_ASSIGNEE' }),
+        data: expect.objectContaining({ code: 'COORDINATOR_PLAN_INVALID' }),
       }))
     })
 
@@ -1621,17 +1650,13 @@ describe('OpenMultiAgent', () => {
       expect(result.agentResults.get('worker')?.output).toBe('worker output')
     })
 
-    it('marks tasks with unknown coordinator dependencies as failed instead of dropping them', async () => {
+    it('fails closed when coordinator dependencies remain unknown after repair', async () => {
+      let coordinatorCalls = 0
       let workerCalls = 0
-      let synthesisPrompt = ''
       const coordinatorAdapter: LLMAdapter = {
         name: 'coordinator-mock',
-        async chat(messages: LLMMessage[]): Promise<LLMResponse> {
-          const prompt = extractUserPrompt(messages)
-          if (prompt.includes('Task Results')) {
-            synthesisPrompt = prompt
-            return textResponse('final with gap')
-          }
+        async chat(): Promise<LLMResponse> {
+          coordinatorCalls++
           return textResponse('```json\n[{"title": "Use missing", "description": "Use a missing result", "assignee": "worker", "dependsOn": ["Missing research"]}]\n```')
         },
         async *stream() { yield { type: 'done' as const, data: {} } },
@@ -1654,22 +1679,18 @@ describe('OpenMultiAgent', () => {
         coordinator: { adapter: coordinatorAdapter },
       })
 
-      const task = result.tasks?.find((t) => t.title === 'Use missing')
-      expect(task?.status).toBe('failed')
-      expect(synthesisPrompt).toContain('Unresolved dependency reference(s): Missing research')
+      expect(result.success).toBe(false)
+      expect(result.tasks).toEqual([])
+      expect(coordinatorCalls).toBe(2)
       expect(workerCalls).toBe(0)
     })
 
-    it('fails ambiguous title dependencies when coordinator emits duplicate task titles', async () => {
-      let synthesisPrompt = ''
+    it('fails closed when duplicate coordinator task titles remain ambiguous after repair', async () => {
+      let coordinatorCalls = 0
       const coordinatorAdapter: LLMAdapter = {
         name: 'coordinator-mock',
-        async chat(messages: LLMMessage[]): Promise<LLMResponse> {
-          const prompt = extractUserPrompt(messages)
-          if (prompt.includes('Task Results')) {
-            synthesisPrompt = prompt
-            return textResponse('final with ambiguity')
-          }
+        async chat(): Promise<LLMResponse> {
+          coordinatorCalls++
           return textResponse([
                 '```json',
                 '[',
@@ -1690,9 +1711,9 @@ describe('OpenMultiAgent', () => {
         coordinator: { adapter: coordinatorAdapter },
       })
 
-      const synth = result.tasks?.find((t) => t.title === 'Synthesize')
-      expect(synth?.status).toBe('failed')
-      expect(synthesisPrompt).toContain('Research (ambiguous duplicate title)')
+      expect(result.success).toBe(false)
+      expect(result.tasks).toEqual([])
+      expect(coordinatorCalls).toBe(2)
     })
 
     it('includes failed and skipped task sections in final synthesis prompt', async () => {

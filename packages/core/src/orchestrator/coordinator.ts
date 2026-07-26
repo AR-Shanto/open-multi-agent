@@ -8,6 +8,7 @@
  */
 
 import type { RunOptions } from '../agent/runner.js'
+import { extractJSON } from '../agent/structured-output.js'
 import type {
   AgentConfig,
   AgentRunResult,
@@ -35,6 +36,7 @@ import {
   withModelRoute,
   routeMatches,
 } from './agent-config.js'
+import { z } from 'zod'
 
 /**
  * Partial verify config that the coordinator can emit in task JSON.
@@ -68,6 +70,119 @@ export interface ParsedTaskSpec {
    * `verifyJudges` is available).
    */
   verify?: ConsensusVerifyOptions | CoordinatorVerifySpec | true
+}
+
+const coordinatorVerifySchema = z.union([
+  z.literal(true),
+  z.object({
+    mode: z.enum(['refute', 'lens']).optional(),
+    quorum: z.number().int().positive().optional(),
+    maxRounds: z.number().int().positive().optional(),
+    onDissent: z.enum(['revise', 'reject', 'keep']).optional(),
+  }).strict(),
+])
+
+const coordinatorTaskSpecSchema = z.object({
+  title: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  assignee: z.string().trim().min(1).optional(),
+  dependsOn: z.array(z.string().trim().min(1)).optional(),
+  memoryScope: z.enum(['dependencies', 'all']).optional(),
+  maxRetries: z.number().int().nonnegative().optional(),
+  retryDelayMs: z.number().finite().nonnegative().optional(),
+  retryBackoff: z.number().finite().positive().optional(),
+  role: z.string().trim().min(1).optional(),
+  priority: z.enum(['low', 'normal', 'high', 'critical']).optional(),
+  requires: z.object({
+    requiredTools: z.array(z.string().trim().min(1)).optional(),
+    requiredCapabilities: z.array(z.string().trim().min(1)).optional(),
+    requiredBackend: z.enum(['llm', 'process', 'acp']).optional(),
+    requiredProvider: z.string().trim().min(1).optional(),
+  }).strict().optional(),
+  verify: coordinatorVerifySchema.optional(),
+}).strict()
+
+const coordinatorTaskSpecsSchema = z.array(coordinatorTaskSpecSchema).min(1)
+
+/**
+ * Build the coordinator output contract for one team. The roster and task
+ * titles are runtime facts, so they belong in the same schema that triggers
+ * the Agent's single structured-output repair attempt.
+ */
+export function buildCoordinatorTaskSpecsSchema(
+  agents: readonly AgentConfig[],
+  strictAssignees: boolean,
+) {
+  const roster = new Set(agents.map((agent) => agent.name))
+  const normalizeTitle = (title: string) => title.toLowerCase().trim()
+
+  return coordinatorTaskSpecsSchema.superRefine((tasks, ctx) => {
+    const titleIndexes = new Map<string, number[]>()
+    for (let index = 0; index < tasks.length; index++) {
+      const key = normalizeTitle(tasks[index]!.title)
+      const indexes = titleIndexes.get(key) ?? []
+      indexes.push(index)
+      titleIndexes.set(key, indexes)
+    }
+
+    for (let index = 0; index < tasks.length; index++) {
+      const task = tasks[index]!
+      if (strictAssignees && task.assignee !== undefined && !roster.has(task.assignee)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [index, 'assignee'],
+          message: `Unknown assignee "${task.assignee}".`,
+        })
+      }
+      for (const [dependencyIndex, dependency] of (task.dependsOn ?? []).entries()) {
+        const matches = titleIndexes.get(normalizeTitle(dependency)) ?? []
+        if (matches.length !== 1) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [index, 'dependsOn', dependencyIndex],
+            message: matches.length === 0
+              ? `Unknown dependency "${dependency}".`
+              : `Ambiguous dependency "${dependency}".`,
+          })
+        }
+      }
+    }
+
+    for (const [title, indexes] of titleIndexes) {
+      if (indexes.length > 1) {
+        for (const index of indexes) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [index, 'title'],
+            message: `Duplicate task title "${title}".`,
+          })
+        }
+      }
+    }
+
+    const visiting = new Set<number>()
+    const visited = new Set<number>()
+    const visit = (index: number): boolean => {
+      if (visiting.has(index)) return true
+      if (visited.has(index)) return false
+      visiting.add(index)
+      const task = tasks[index]!
+      for (const dependency of task.dependsOn ?? []) {
+        const matches = titleIndexes.get(normalizeTitle(dependency)) ?? []
+        if (matches.length === 1 && visit(matches[0]!)) return true
+      }
+      visiting.delete(index)
+      visited.add(index)
+      return false
+    }
+    if (tasks.some((_, index) => visit(index))) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [],
+        message: 'Cyclic task dependency detected.',
+      })
+    }
+  })
 }
 
 export interface InvalidAssigneeIssue {
@@ -139,50 +254,9 @@ export function parseCoordinatorVerify(raw: unknown): CoordinatorVerifySpec | tr
  * or as a bare array. Returns `null` when no valid array can be extracted.
  */
 export function parseTaskSpecs(raw: string): ParsedTaskSpec[] | null {
-  // Strategy 1: look for a fenced JSON block
-  const fenceMatch = raw.match(/```json\s*([\s\S]*?)```/)
-  const candidate = fenceMatch ? fenceMatch[1]! : raw
-
-  // Strategy 2: find the first '[' and last ']'
-  const arrayStart = candidate.indexOf('[')
-  const arrayEnd = candidate.lastIndexOf(']')
-  if (arrayStart === -1 || arrayEnd === -1 || arrayEnd <= arrayStart) {
-    return null
-  }
-
-  const jsonSlice = candidate.slice(arrayStart, arrayEnd + 1)
   try {
-    const parsed: unknown = JSON.parse(jsonSlice)
-    if (!Array.isArray(parsed)) return null
-
-    const specs: ParsedTaskSpec[] = []
-    for (const item of parsed) {
-      if (typeof item !== 'object' || item === null) continue
-      const obj = item as Record<string, unknown>
-      if (typeof obj['title'] !== 'string') continue
-      if (typeof obj['description'] !== 'string') continue
-
-      specs.push({
-        title: obj['title'],
-        description: obj['description'],
-        assignee: typeof obj['assignee'] === 'string' ? obj['assignee'] : undefined,
-        dependsOn: Array.isArray(obj['dependsOn'])
-          ? (obj['dependsOn'] as unknown[]).filter((x): x is string => typeof x === 'string')
-          : undefined,
-        memoryScope: obj['memoryScope'] === 'all' ? 'all' : undefined,
-        maxRetries: typeof obj['maxRetries'] === 'number' ? obj['maxRetries'] : undefined,
-        retryDelayMs: typeof obj['retryDelayMs'] === 'number' ? obj['retryDelayMs'] : undefined,
-        retryBackoff: typeof obj['retryBackoff'] === 'number' ? obj['retryBackoff'] : undefined,
-        role: typeof obj['role'] === 'string' ? obj['role'] : undefined,
-        priority: obj['priority'] === 'low' || obj['priority'] === 'normal' || obj['priority'] === 'high' || obj['priority'] === 'critical'
-          ? obj['priority']
-          : undefined,
-        requires: parseTaskRequirements(obj['requires']),
-        verify: parseCoordinatorVerify(obj['verify']),
-      })
-    }
-
-    return specs.length > 0 ? specs : null
+    const parsed = coordinatorTaskSpecsSchema.safeParse(extractJSON(raw))
+    return parsed.success ? parsed.data as ParsedTaskSpec[] : null
   } catch {
     return null
   }
@@ -384,8 +458,7 @@ export function buildCoordinatorOutputFormatSection(hasVerifyJudges?: boolean): 
     '  3. Avoid adding a dependency just because the information "would be useful" or matches general best practice; if the manifest gives no indication X consumes that input, prefer to leave it out.',
     '  4. When uncertain, prefer fewer dependencies over more — extra parents cost parallelism and tokens.',
     '',
-    'Wrap the JSON in a ```json code fence.',
-    'Do not include any text outside the code fence.',
+    'Return only the JSON array. Do not use Markdown code fences or extra text.',
   )
   return lines.join('\n')
 }
@@ -408,7 +481,7 @@ export function buildDecompositionPrompt(goal: string, agents: AgentConfig[]): s
     `## Goal`,
     goal,
     '',
-    'Return ONLY the JSON task array in a ```json code fence.',
+    'Return ONLY the JSON task array. Do not use a Markdown code fence.',
   ].join('\n')
 }
 

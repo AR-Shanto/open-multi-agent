@@ -1691,10 +1691,9 @@ export interface OrchestratorConfig {
   /**
    * Reject coordinator plans that name an assignee outside the team roster.
    *
-   * Defaults to `false`: invalid names are cleared, a structured `warning`
-   * progress event is emitted, and the configured scheduler assigns the task.
-   * When `true`, the run terminates with a structured `INVALID_ASSIGNEE`
-   * validation error before any planned task executes.
+   * Defaults to `true`: coordinator output that names an unknown agent is
+   * rejected before task execution. Set to `false` only to retain legacy
+   * behavior that clears the assignment and lets the scheduler choose.
    */
   readonly strictAssignees?: boolean
   /**

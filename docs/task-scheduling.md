@@ -127,10 +127,10 @@ state. Assignments earlier in one scheduler call are not folded into that same
 call; in event-driven execution the next ready-task call can observe tasks
 already marked `in_progress`.
 
-Coordinator plans that name an agent outside the roster emit an
-`INVALID_ASSIGNEE` warning, clear that assignment, and use the configured
-scheduler by default. Set `strictAssignees: true` to stop before task execution
-with a structured validation error instead.
+Coordinator plans that name an agent outside the roster fail validation before
+task execution by default. Set `strictAssignees: false` only to retain the
+legacy behavior of emitting an `INVALID_ASSIGNEE` warning, clearing that
+assignment, and using the configured scheduler.
 
 ## Approval modes
 

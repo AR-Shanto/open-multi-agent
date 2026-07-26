@@ -153,10 +153,11 @@ const orchestrator = new OpenMultiAgent({
 
 Agent 可声明 `description`、`capabilities`、`costTier` 与 `latencyClass`，
 任务可通过 `requires` 声明硬约束。任何调度策略无法满足这些约束时，都会在
-worker 执行前失败；设置 `strictAssignees: true` 可在 coordinator 计划引用
-roster 之外的 Agent 时提前失败。权重语义、负载归一化、`NO_ELIGIBLE_AGENT`
-与 `INVALID_ASSIGNEE` 行为、审批兼容与 progress 事件迁移见
-[任务调度与派发](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/task-scheduling.md)。
+worker 执行前失败。Coordinator 计划默认也会在引用
+roster 之外的 Agent 时提前失败；仅在需要保留旧的自动重新分配行为时设置
+`strictAssignees: false`。权重语义、负载归一化、
+`NO_ELIGIBLE_AGENT` 与 `INVALID_ASSIGNEE` 行为、审批兼容与 progress 事件迁移
+见[任务调度与派发](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/task-scheduling.md)。
 
 ## 核心能力
 
