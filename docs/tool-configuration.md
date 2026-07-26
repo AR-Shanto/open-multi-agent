@@ -29,9 +29,9 @@ result reports `governanceConclusion: 'not-applicable'` until that plan is
 executed, for example through `runFromPlan()`.
 
 Use `governanceIntent: 'none'` to opt into automatic `runTeam()` routing
-explicitly. Omitting `governanceIntent` does the same. In the next major
-behavior contract this route is Hybrid by default: a deterministic Single
-candidate may be upgraded after one semantic profile call. Set
+explicitly. Omitting `governanceIntent` does the same. This route is Hybrid by
+default: a deterministic Single candidate may be upgraded after one semantic
+profile call. Set
 `executionRouting: { strategy: 'deterministic' }` for the previous no-profiler
 behavior.
 

@@ -5,7 +5,10 @@ import {
   DeterministicRouter,
 } from '../src/orchestrator/execution-router.js'
 import { buildExecutionReceipt } from '../src/observability/execution-receipt.js'
+import { BatchingTraceSink } from '../src/observability/batching.js'
+import { InMemoryTraceStore } from '../src/observability/in-memory-store.js'
 import { TRACE_RECORD_OBSERVER } from '../src/observability/runtime.js'
+import { TraceStoreExporter } from '../src/observability/store-exporter.js'
 import type { TraceRecord } from '../src/observability/records.js'
 import { OpenMultiAgent } from '../src/orchestrator/orchestrator.js'
 import { RoutingTimeoutError } from '../src/errors.js'
@@ -117,7 +120,9 @@ describe('DeterministicRouter', () => {
 
 describe('runTeam execution routing', () => {
   it('exposes the built-in decision on auto routes', async () => {
-    const result = await run('Say hello')
+    const result = await run('Say hello', {
+      executionRouting: { strategy: 'deterministic' },
+    })
 
     expect(result.routingDecision).toMatchObject({
       mode: 'single',
@@ -313,10 +318,30 @@ describe('runTeam execution routing', () => {
       fallbackCode: 'router-timeout',
     })
 
-    await expect(run('Say hello', {
-      executionRouter: stalled,
-      executionRouting: { timeoutMs: 1, failurePolicy: 'fail' },
-    })).rejects.toBeInstanceOf(RoutingTimeoutError)
+    const store = new InMemoryTraceStore()
+    const sink = new BatchingTraceSink(new TraceStoreExporter(store), {
+      diagnostics: 'silent',
+      scheduledDelayMs: 60_000,
+    })
+    await expect(run(
+      'Say hello',
+      {
+        runId: 'execution-router-fail',
+        executionRouter: stalled,
+        executionRouting: { timeoutMs: 1, failurePolicy: 'fail' },
+      },
+      undefined,
+      agents(),
+      { observability: { sinks: [sink] } },
+    )).rejects.toBeInstanceOf(RoutingTimeoutError)
+    await expect(sink.forceFlush({ timeoutMs: 500 })).resolves.toMatchObject({
+      status: 'ok',
+    })
+    await expect(store.getRun('execution-router-fail')).resolves.toMatchObject({
+      incomplete: false,
+      status: 'timeout',
+    })
+    await sink.shutdown({ timeoutMs: 500 })
   })
 
   it('bypasses routers and marks an explicit mode as an override', async () => {

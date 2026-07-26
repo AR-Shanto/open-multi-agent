@@ -599,10 +599,14 @@ families carry no declaration.
 
 The test injects one deterministic `LLMAdapter` into every worker and the
 coordinator. Every model call returns the same fixed text, including a valid
-two-role coordinator plan, so it makes no network request and needs no API key.
-Within one family, the goal text is therefore the only routing input that
-changes. The measured topology comes from `buildExecutionReceipt(result)` and
-the `result.tasks` short-circuit marker, and contains only:
+two-role coordinator plan. It also injects a valid low-risk `TaskProfiler`
+fixture for benign Single candidates and fails the test unless Hybrid profiling
+finishes with `outcome: 'applied'`; the gate therefore cannot pass by silently
+falling back from invalid profile output. The suite makes no network request
+and needs no API key. Within one family, the goal text is therefore the only
+routing input that changes. The measured topology comes from
+`buildExecutionReceipt(result)` and the `result.tasks` short-circuit marker, and
+contains only:
 
 - `single-short-circuit` versus task graph;
 - the worker roles that actually executed; and

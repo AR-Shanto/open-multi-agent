@@ -20,6 +20,7 @@ import type {
   LLMAdapter,
   LLMResponse,
   RunTeamOptions,
+  TaskProfiler,
   TeamRunResult,
 } from '../src/types.js'
 
@@ -239,6 +240,29 @@ function fixedAdapter(): LLMAdapter {
   }
 }
 
+function fixedProfiler(): TaskProfiler {
+  return {
+    version: 'routing-stability-profiler-v1',
+    async profile() {
+      return {
+        profile: {
+          evidenceSources: 'single',
+          independentReview: 'none',
+          conflictingObjectives: false,
+          sideEffectIntent: 'none',
+          permissionIsolation: 'none',
+          decomposable: false,
+          parallelizable: false,
+          complexity: 'low',
+          confidence: 0.95,
+          reasons: ['Frozen benign routing profile.'],
+          source: 'inferred',
+        },
+      }
+    },
+  }
+}
+
 function agent(
   name: string,
   systemPrompt: string,
@@ -277,7 +301,10 @@ async function runActualRoute(
   signal: AbortSignal,
 ): Promise<Omit<RouteObservation, 'variant'>> {
   const adapter = fixedAdapter()
-  const orchestrator = new OpenMultiAgent({ defaultModel: 'mock-model' })
+  const orchestrator = new OpenMultiAgent({
+    defaultModel: 'mock-model',
+    executionRouting: { profiler: fixedProfiler() },
+  })
   const team = orchestrator.createTeam(`routing-stability-${family.id}-${variant.id}`, {
     name: `routing-stability-${family.id}`,
     agents: [
@@ -295,6 +322,17 @@ async function runActualRoute(
     ...family.declaration,
   }
   const result = await orchestrator.runTeam(team, variant.text, options)
+  if (
+    family.kind === 'benign'
+    && (
+      result.semanticRoutingAssessment?.outcome !== 'applied'
+      || result.semanticRoutingAssessment.recommendation !== 'single'
+    )
+  ) {
+    throw new Error(
+      `Benign routing fixture ${family.id}/${variant.id} did not exercise applied Hybrid profiling.`,
+    )
+  }
   return {
     topology: topologyFromResult(result),
     governanceConclusion: result.governanceConclusion ?? 'missing',

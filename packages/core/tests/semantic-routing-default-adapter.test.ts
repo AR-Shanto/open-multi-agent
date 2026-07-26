@@ -14,31 +14,32 @@ import { OpenMultiAgent } from '../src/orchestrator/orchestrator.js'
 
 describe('semantic routing default adapter resolution', () => {
   it('creates the profiler adapter from the default provider as the final fallback', async () => {
+    const defaultRoutingChat = vi.fn(
+      async (_messages: LLMMessage[], options: LLMChatOptions): Promise<LLMResponse> => ({
+        id: 'default-routing-profile',
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            evidenceSources: 'single',
+            independentReview: 'none',
+            conflictingObjectives: false,
+            sideEffectIntent: 'none',
+            permissionIsolation: 'none',
+            decomposable: false,
+            parallelizable: false,
+            complexity: 'low',
+            confidence: 0.95,
+            reasons: ['One simple task.'],
+          }),
+        }],
+        model: options.model,
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 2, output_tokens: 1 },
+      }),
+    )
     mocks.createAdapter.mockResolvedValue({
       name: 'default-routing-adapter',
-      async chat(_messages: LLMMessage[], options: LLMChatOptions): Promise<LLMResponse> {
-        return {
-          id: 'default-routing-profile',
-          content: [{
-            type: 'text',
-            text: JSON.stringify({
-              evidenceSources: 'single',
-              independentReview: 'none',
-              conflictingObjectives: false,
-              sideEffectIntent: 'none',
-              permissionIsolation: 'none',
-              decomposable: false,
-              parallelizable: false,
-              complexity: 'low',
-              confidence: 0.95,
-              reasons: ['One simple task.'],
-            }),
-          }],
-          model: options.model,
-          stop_reason: 'end_turn',
-          usage: { input_tokens: 2, output_tokens: 1 },
-        }
-      },
+      chat: defaultRoutingChat,
       async *stream() { /* unused */ },
     } satisfies LLMAdapter)
     const agentAdapter: LLMAdapter = {
@@ -70,6 +71,7 @@ describe('semantic routing default adapter resolution', () => {
     const result = await oma.runTeam(team, 'Say hello')
 
     expect(mocks.createAdapter).toHaveBeenCalledWith('openai', undefined, undefined)
+    expect(JSON.stringify(defaultRoutingChat.mock.calls[0]?.[0])).toContain('Say hello')
     expect(result.semanticRoutingAssessment).toMatchObject({
       recommendation: 'single',
       actualMode: 'single',

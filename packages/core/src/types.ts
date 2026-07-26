@@ -1420,7 +1420,7 @@ export type RoutingFailurePolicy = 'fallback' | 'fail'
 
 /** Hybrid execution-routing controls shared by orchestrator and per-run config. */
 export interface ExecutionRoutingConfig {
-  /** Defaults to `hybrid` in the next major behavior contract. */
+  /** Defaults to `hybrid`. Use `deterministic` for the legacy no-profiler path. */
   readonly strategy?: ExecutionRoutingStrategy
   /** Custom profiler. When omitted, OMA builds an {@link LLMTaskProfiler}. */
   readonly profiler?: TaskProfiler
@@ -1620,6 +1620,11 @@ export type GovernanceUnsatisfiedReason = 'overridden' | 'budget'
 
 /** Run-level aggregated metrics summary. */
 export interface RunMetrics {
+  /**
+   * All usage charged to the run, including semantic-routing usage when Hybrid
+   * routing profiles a deterministic Single candidate. It may therefore exceed
+   * the sum of task-level `metrics.tokenUsage`.
+   */
   readonly totalTokens: TokenUsage
   readonly totalRetries: number
   readonly errorCount: number

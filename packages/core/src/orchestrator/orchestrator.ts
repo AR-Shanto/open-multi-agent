@@ -236,6 +236,50 @@ interface SemanticProfileRun {
   readonly reasons: readonly string[]
 }
 
+function validateExecutionRoutingConfig(config?: ExecutionRoutingConfig): void {
+  if (
+    config?.strategy !== undefined
+    && config.strategy !== 'hybrid'
+    && config.strategy !== 'deterministic'
+  ) {
+    throw new TypeError("executionRouting.strategy must be 'hybrid' or 'deterministic'.")
+  }
+  if (
+    config?.failurePolicy !== undefined
+    && config.failurePolicy !== 'fallback'
+    && config.failurePolicy !== 'fail'
+  ) {
+    throw new TypeError("executionRouting.failurePolicy must be 'fallback' or 'fail'.")
+  }
+  if (
+    config?.confidenceThreshold !== undefined
+    && (
+      !Number.isFinite(config.confidenceThreshold)
+      || config.confidenceThreshold < 0
+      || config.confidenceThreshold > 1
+    )
+  ) {
+    throw new TypeError('executionRouting.confidenceThreshold must be between 0 and 1.')
+  }
+  if (
+    config?.timeoutMs !== undefined
+    && (!Number.isFinite(config.timeoutMs) || config.timeoutMs <= 0)
+  ) {
+    throw new TypeError('executionRouting.timeoutMs must be a positive finite number.')
+  }
+}
+
+function closeTraceForFailure(
+  traceRuntime: TraceRuntime | undefined,
+  error: unknown,
+): void {
+  const classified = classifyRunFailure(error)
+  traceRuntime?.close({
+    status: classified.status,
+    error: classified.errorInfo,
+  })
+}
+
 function resolveRunBudgets(
   config: Pick<OrchestratorConfig, 'maxTokenBudget' | 'maxCostBudget' | 'estimateCost'>,
   options?: Pick<RunTasksOptions, 'maxTokenBudget' | 'maxCostBudget'>,
@@ -294,6 +338,7 @@ export class OpenMultiAgent {
     if (config.onApproval && config.onTaskDispatch) {
       throw new Error('onApproval and onTaskDispatch are mutually exclusive approval modes.')
     }
+    validateExecutionRoutingConfig(config.executionRouting)
 
     this.traceRecordObserver = traceRecordObserverFrom(config)
     this.hasConfiguredCustomExecutionRouter = config.executionRouter !== undefined
@@ -438,25 +483,7 @@ export class OpenMultiAgent {
       ...(adapter !== undefined ? { adapter } : {}),
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     }
-    if (resolved.strategy !== 'hybrid' && resolved.strategy !== 'deterministic') {
-      throw new TypeError("executionRouting.strategy must be 'hybrid' or 'deterministic'.")
-    }
-    if (resolved.failurePolicy !== 'fallback' && resolved.failurePolicy !== 'fail') {
-      throw new TypeError("executionRouting.failurePolicy must be 'fallback' or 'fail'.")
-    }
-    if (
-      !Number.isFinite(resolved.confidenceThreshold)
-      || resolved.confidenceThreshold < 0
-      || resolved.confidenceThreshold > 1
-    ) {
-      throw new TypeError('executionRouting.confidenceThreshold must be between 0 and 1.')
-    }
-    if (
-      resolved.timeoutMs !== undefined
-      && (!Number.isFinite(resolved.timeoutMs) || resolved.timeoutMs <= 0)
-    ) {
-      throw new TypeError('executionRouting.timeoutMs must be a positive finite number.')
-    }
+    validateExecutionRoutingConfig(resolved)
     return resolved
   }
 
@@ -934,12 +961,12 @@ export class OpenMultiAgent {
       )
     }
 
-    const { identity, metadata } = createRunFacts(identityOptionsForRun(options))
-    const traceRuntime = this.startTrace(identity, metadata)
     const executionRouting = this.resolveExecutionRoutingConfig(
       options?.executionRouting,
       options?.coordinator,
     )
+    const { identity, metadata } = createRunFacts(identityOptionsForRun(options))
+    const traceRuntime = this.startTrace(identity, metadata)
     const routingContext = buildRoutingContext(
       goal,
       agentConfigs,
@@ -947,19 +974,25 @@ export class OpenMultiAgent {
       budgets,
       options?.abortSignal,
     )
-    let routerDecision: ExecutionRoutingDecision | undefined = explicitMode === undefined
-      && !options?.planOnly
-      && !preferredBudgetDegraded
-      ? await resolveExecutionRouting(
-          options?.executionRouter ?? this.config.executionRouter,
-          routingContext,
-          new DeterministicRouter(),
-          {
-            timeoutMs: executionRouting.timeoutMs,
-            failurePolicy: executionRouting.failurePolicy,
-          },
-        )
-      : undefined
+    let routerDecision: ExecutionRoutingDecision | undefined
+    try {
+      routerDecision = explicitMode === undefined
+        && !options?.planOnly
+        && !preferredBudgetDegraded
+        ? await resolveExecutionRouting(
+            options?.executionRouter ?? this.config.executionRouter,
+            routingContext,
+            new DeterministicRouter(),
+            {
+              timeoutMs: executionRouting.timeoutMs,
+              failurePolicy: executionRouting.failurePolicy,
+            },
+          )
+        : undefined
+    } catch (error) {
+      closeTraceForFailure(traceRuntime, error)
+      throw error
+    }
     let semanticProfileRun: SemanticProfileRun | undefined
     const customRouterSelected = options?.executionRouter !== undefined
       || this.hasConfiguredCustomExecutionRouter
@@ -974,22 +1007,27 @@ export class OpenMultiAgent {
           applyAgentDefaults(agentConfig, this.config),
           this.config.defaultToolPreset,
         ))
-      semanticProfileRun = await this.runSemanticProfiler(
-        routingContext,
-        executionRouting,
-        options?.coordinator,
-        traceRuntime,
-        {
-          hasConsequentialTools: effectiveAgents.some((agentConfig) =>
-            hasGrantedConsequentialTool(agentConfig, { includeDelegateTool: true })),
-          permissionBoundaryCount: new Set(
-            effectiveAgents
-              .map((agentConfig) => agentConfig.permissionBoundary)
-              .filter((boundary): boundary is string =>
-                typeof boundary === 'string' && boundary.length > 0),
-          ).size,
-        },
-      )
+      try {
+        semanticProfileRun = await this.runSemanticProfiler(
+          routingContext,
+          executionRouting,
+          options?.coordinator,
+          traceRuntime,
+          {
+            hasConsequentialTools: effectiveAgents.some((agentConfig) =>
+              hasGrantedConsequentialTool(agentConfig, { includeDelegateTool: true })),
+            permissionBoundaryCount: new Set(
+              effectiveAgents
+                .map((agentConfig) => agentConfig.permissionBoundary)
+                .filter((boundary): boundary is string =>
+                  typeof boundary === 'string' && boundary.length > 0),
+            ).size,
+          },
+        )
+      } catch (error) {
+        closeTraceForFailure(traceRuntime, error)
+        throw error
+      }
       if (semanticProfileRun.assessment.recommendation === 'team') {
         routerDecision = {
           ...deterministicSingleDecision,
@@ -998,15 +1036,6 @@ export class OpenMultiAgent {
           reasons: [...deterministicSingleDecision.reasons, ...semanticProfileRun.reasons],
           routerVersion: HYBRID_ROUTER_VERSION,
         }
-      }
-      semanticProfileRun = {
-        ...semanticProfileRun,
-        assessment: {
-          ...semanticProfileRun.assessment,
-          ...(semanticProfileRun.assessment.recommendation !== 'needs-declaration'
-            ? { actualMode: routerDecision!.mode }
-            : {}),
-        },
       }
     }
     let routingDecisionInput: RoutingDecisionRecordInput = explicitMode !== undefined
@@ -1083,6 +1112,23 @@ export class OpenMultiAgent {
         assessment: {
           ...semanticProfileRun.assessment,
           estimatedCost: routingCost,
+        },
+      }
+      routingDecisionInput = {
+        ...routingDecisionInput,
+        semanticRoutingAssessment: semanticProfileRun.assessment,
+      }
+    }
+    if (
+      semanticProfileRun !== undefined
+      && semanticProfileRun.assessment.recommendation !== 'needs-declaration'
+      && routingBudget?.exceeded === undefined
+    ) {
+      semanticProfileRun = {
+        ...semanticProfileRun,
+        assessment: {
+          ...semanticProfileRun.assessment,
+          actualMode: routerDecision!.mode,
         },
       }
       routingDecisionInput = {

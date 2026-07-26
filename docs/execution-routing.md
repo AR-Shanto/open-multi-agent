@@ -65,6 +65,13 @@ The built-in Profiler resolves its adapter in this order:
 3. the effective Coordinator adapter;
 4. an adapter created from the orchestrator's default provider/model.
 
+The selected adapter receives the goal text as untrusted user data. In
+particular, step 4 can send the goal to `defaultProvider` even when every worker
+uses its own adapter and the deterministic Single path previously needed no
+default-provider call. Applications with data-residency or provider-boundary
+requirements should configure `executionRouting.adapter`, provide a Coordinator
+adapter, or select `strategy: 'deterministic'`.
+
 `executionRouting.model` follows the same per-run-over-orchestrator precedence,
 then the Coordinator model and default model. Profiler usage is charged to the
 run token/cost budget and appears in routing tracing and
@@ -118,6 +125,8 @@ invalid structured output keeps that deterministic route.
 
 Set `failurePolicy: 'fail'` to terminate instead. Profiler failures use
 `ROUTING_PROFILER_FAILED`; Router/Profiler deadlines use `ROUTING_TIMEOUT`.
+The run trace is closed with the corresponding error or timeout status before
+the typed error is rethrown, so failed routing does not leave an incomplete run.
 Machine-readable `status`, `requestedRouterVersion`, and `fallbackCode` fields
 remove the need to parse human-readable `reasons`.
 
@@ -164,6 +173,12 @@ result and custom-Router fallback behavior. The compatibility path remains
 available for offline use, incident degradation, and the entire major release
 cycle.
 
+Explicitly installing `new DeterministicRouter()` as `executionRouter` also
+makes that valid Router decision final under the precedence rules, so the
+Profiler does not reinterpret it. Prefer `strategy: 'deterministic'` when the
+intent is compatibility mode because it states the no-profiler behavior
+directly.
+
 ## Built-in deterministic policy
 
 `DeterministicRouter` wraps the single `isSimpleGoal()` heuristic; OMA does not maintain a second competing heuristic.
@@ -197,9 +212,11 @@ come from structured governance declarations and the executed topology.
 
 ## Major-version migration
 
-The next major release changes automatic `runTeam()` from deterministic-only to
-Hybrid by default. A short goal may therefore make one additional model call
-and upgrade from Single to Team, increasing latency, token use, and cost.
+This implementation is intended for the next major release because it changes
+automatic `runTeam()` from deterministic-only to Hybrid by default. In this
+code, Hybrid is already the runtime default. A short goal may therefore make
+one additional model call and upgrade from Single to Team, increasing latency,
+token use, and cost.
 Applications that require exact old call counts or fully offline routing should
 set `executionRouting: { strategy: 'deterministic' }` before upgrading.
 

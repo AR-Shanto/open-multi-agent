@@ -122,6 +122,12 @@ Execution Routing selects Single versus Team; [Model
 Routing](https://github.com/open-multi-agent/open-multi-agent/blob/main/docs/model-routing.md)
 selects models inside that topology.
 
+The Profiler sends the goal to the configured routing adapter, then the
+Coordinator adapter, or finally the orchestrator's default provider. That last
+fallback can make a provider call even when every worker has its own adapter.
+Configure `executionRouting.adapter` or use deterministic strategy when the goal
+must not cross that provider boundary.
+
 When an application must enforce named independent roles, declare that governance intent instead of relying on wording in the goal:
 
 ```typescript

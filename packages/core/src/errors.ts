@@ -101,7 +101,7 @@ export class RoutingProfilerFailedError extends Error {
     message: string,
     readonly cause?: unknown,
   ) {
-    super(message)
+    super(message, cause !== undefined ? { cause } : undefined)
     this.name = 'RoutingProfilerFailedError'
   }
 }

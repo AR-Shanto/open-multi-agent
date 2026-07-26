@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  DeterministicRouter,
   evaluateSemanticRoutingPolicy,
   LLMTaskProfiler,
   OpenMultiAgent,
@@ -14,6 +15,7 @@ import {
 } from '../src/index.js'
 import type {
   AgentConfig,
+  ExecutionRoutingConfig,
   LLMAdapter,
   LLMResponse,
   RunTeamOptions,
@@ -230,6 +232,40 @@ describe('LLMTaskProfiler', () => {
 })
 
 describe('hybrid runTeam routing', () => {
+  it.each([
+    [{ strategy: 'hybird' }, /strategy/],
+    [{ failurePolicy: 'ignore' }, /failurePolicy/],
+    [{ confidenceThreshold: 1.1 }, /confidenceThreshold/],
+    [{ timeoutMs: 0 }, /timeoutMs/],
+  ])('rejects invalid orchestrator routing config at construction', (config, expected) => {
+    expect(() => new OpenMultiAgent({
+      executionRouting: config as unknown as ExecutionRoutingConfig,
+    })).toThrow(expected)
+  })
+
+  it('rejects invalid per-run routing config before starting a run trace', async () => {
+    const store = new InMemoryTraceStore()
+    const sink = new BatchingTraceSink(new TraceStoreExporter(store), {
+      diagnostics: 'silent',
+      scheduledDelayMs: 60_000,
+    })
+    const { run } = createRun(profiler(profile()), {}, {
+      observability: { sinks: [sink] },
+    })
+
+    await expect(run('Say hello', {
+      runId: 'invalid-routing-config',
+      executionRouting: {
+        timeoutMs: 0,
+      } as unknown as ExecutionRoutingConfig,
+    })).rejects.toThrow(/timeoutMs/)
+    await expect(sink.forceFlush({ timeoutMs: 500 })).resolves.toMatchObject({
+      status: 'ok',
+    })
+    await expect(store.getRun('invalid-routing-config')).resolves.toBeNull()
+    await sink.shutdown({ timeoutMs: 500 })
+  })
+
   it('is the default and upgrades only a deterministic Single to Team', async () => {
     const taskProfiler = profiler(profile({ evidenceSources: 'multiple' }))
     const { run } = createRun(taskProfiler)
@@ -329,6 +365,22 @@ describe('hybrid runTeam routing', () => {
     })
   })
 
+  it('treats an explicitly installed DeterministicRouter as a final Router decision', async () => {
+    const taskProfiler = profiler(profile({ evidenceSources: 'multiple' }))
+    const { run } = createRun(taskProfiler, {}, {
+      executionRouter: new DeterministicRouter(),
+    })
+
+    const result = await run()
+
+    expect(taskProfiler.profile).not.toHaveBeenCalled()
+    expect(result.routingDecision).toMatchObject({
+      mode: 'single',
+      routerVersion: 'deterministic-v1',
+      status: 'selected',
+    })
+  })
+
   it('keeps legacy custom-Router fallback call counts in deterministic mode', async () => {
     const taskProfiler = profiler(profile({ evidenceSources: 'multiple' }))
     const { agentAdapter, coordinatorAdapter, run } = createRun(taskProfiler)
@@ -364,10 +416,29 @@ describe('hybrid runTeam routing', () => {
       fallbackCode: 'invalid-profile',
     })
 
+    const cause = new Error('invalid profile')
+    expect(new RoutingProfilerFailedError('failed', cause).cause).toBe(cause)
+
+    const store = new InMemoryTraceStore()
+    const sink = new BatchingTraceSink(new TraceStoreExporter(store), {
+      diagnostics: 'silent',
+      scheduledDelayMs: 60_000,
+    })
     const failing = createRun(invalid, {}, {
       executionRouting: { profiler: invalid, failurePolicy: 'fail' },
+      observability: { sinks: [sink] },
     })
-    await expect(failing.run()).rejects.toBeInstanceOf(RoutingProfilerFailedError)
+    await expect(failing.run('Say hello', {
+      runId: 'semantic-profiler-fail',
+    })).rejects.toBeInstanceOf(RoutingProfilerFailedError)
+    await expect(sink.forceFlush({ timeoutMs: 500 })).resolves.toMatchObject({
+      status: 'ok',
+    })
+    await expect(store.getRun('semantic-profiler-fail')).resolves.toMatchObject({
+      incomplete: false,
+      status: 'error',
+    })
+    await sink.shutdown({ timeoutMs: 500 })
   })
 
   it.each([
@@ -474,6 +545,8 @@ describe('hybrid runTeam routing', () => {
     expect(result.success).toBe(false)
     expect(result.status?.code).toBe('budget_exhausted')
     expect(result.totalTokenUsage).toEqual({ input_tokens: 4, output_tokens: 2 })
+    expect(result.semanticRoutingAssessment).not.toHaveProperty('actualMode')
+    expect(result.routingDecision?.semanticRoutingAssessment).not.toHaveProperty('actualMode')
     expect(agentAdapter.chat).not.toHaveBeenCalled()
     expect(coordinatorAdapter.chat).not.toHaveBeenCalled()
   })
