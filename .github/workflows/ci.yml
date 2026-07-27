@@ -44,6 +44,9 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -54,9 +57,9 @@ jobs:
       - run: npm run test:coverage
       - uses: codecov/codecov-action@v5
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
           files: ./packages/core/coverage/lcov.info
-          fail_ci_if_error: false
+          fail_ci_if_error: true
 
   package:
     runs-on: ubuntu-latest
