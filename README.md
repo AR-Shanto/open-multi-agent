@@ -73,6 +73,9 @@ OMA combines dynamic orchestration with the control, evidence, and recovery path
 
 ## Get started
 
+Requires Node.js 20 or newer. For production, use a currently maintained
+Node.js LTS release.
+
 Scaffold a PR review agent, security analysis agent, or teaching DAG:
 
 ```bash
