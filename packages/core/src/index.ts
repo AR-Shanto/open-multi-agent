@@ -202,6 +202,7 @@ export {
   RoutingDeclarationRequiredError,
   RoutingProfilerFailedError,
   RoutingTimeoutError,
+  EgressPolicyError,
   isRetryableError,
 } from './errors.js'
 export { createRunIdentity, createRestoreIdentity, validateRunId } from './observability/identity.js'
@@ -330,6 +331,7 @@ export type {
   LLMToolDef,
   TokenUsage,
   StreamEvent,
+  EgressPolicy,
 
   // Tools
   ToolDefinition,
